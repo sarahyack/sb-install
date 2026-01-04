@@ -73,10 +73,10 @@ autodetect_esp_mount() {
     printf '%s\n' "${mps[0]}"
     return 0
   else
-    echo "Multiple VFAT mounts detected (possible ESPs):"
+    echo "Multiple VFAT mounts detected (possible ESPs):" >&2
     local i
     for i in "${!mps[@]}"; do
-      echo "  $((i+1))) ${mps[$i]}"
+      echo "  $((i+1))) ${mps[$i]}" >&2
     done
     read -r -p "Pick the ESP mount (number): " choice
     [[ "$choice" =~ ^[0-9]+$ ]] || return 2
@@ -88,16 +88,19 @@ autodetect_esp_mount() {
 
 get_esp_or_ask() {
   local esp
+
   if esp="$(autodetect_esp_mount)"; then
-    say "Detected ESP mount: $esp"
-    echo "$esp"
+    [[ -n "$esp" ]] || return 1
+    printf "\n==> Detected ESP mount: %s\n" "$esp" >&2
+    printf '%s\n' "$esp"
     return 0
   fi
-  echo "Couldn't auto-detect a mounted ESP."
-  echo "Try: lsblk -f  OR  findmnt -t vfat"
+
+  printf "Couldn't auto-detect a mounted ESP.\n" >&2
+  printf "Try: lsblk -f  OR  findmnt -t vfat\n" >&2
   read -r -p "Enter your mounted ESP path (example: /boot/efi or /efi): " esp
   [[ -d "$esp" ]] || return 1
-  echo "$esp"
+  printf '%s\n' "$esp"
 }
 
 esp_device_from_mount() {
@@ -130,10 +133,15 @@ get_disk_part_for_efibootmgr() {
   local dev diskpart
 
   dev="$(esp_device_from_mount "$esp")" || return 1
+  if [[ "$dev" == UUID=* ]]; then
+    local uuid="${dev#UUID=}"
+    dev="$(blkid -U "$uuid" 2>/dev/null || true)"
+  fi
+  dev="$(readlink -f -- "$dev" 2>/dev/null || printf '%s' "$dev")"
   [[ -b "$dev" ]] || return 1
 
   diskpart="$(disk_part_from_device "$dev")" || return 1
-  say "ESP device: $dev -> disk/part: ${diskpart/|/ }"
+  printf "\n==> ESP device: %s -> disk/part: %s\n" "$dev" "${diskpart/|/ }" >&2
   printf '%s\n' "$diskpart"
 }
 
@@ -161,10 +169,10 @@ choose_grub_efi() {
     printf '%s\n' "${cands[0]}"
     return 0
   else
-    echo "Multiple grubx64.efi candidates found:"
+    echo "Multiple grubx64.efi candidates found:" >&2
     local i
     for i in "${!cands[@]}"; do
-      echo "  $((i+1))) ${cands[$i]}"
+      echo "  $((i+1))) ${cands[$i]}" >&2
     done
     read -r -p "Pick which GRUB EFI to use (number): " choice
     [[ "$choice" =~ ^[0-9]+$ ]] || return 2
@@ -223,11 +231,11 @@ pick_esp() {
 }
 
 pick_disk_part() {
-  say "efibootmgr needs the disk + partition number for the ESP."
-  echo "Helpful commands:"
-  echo "  lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,PARTUUID"
-  echo "  sudo fdisk -l"
-  echo
+  printf "\n==> efibootmgr needs the disk + partition number for the ESP. \n" >&2
+  printf "Helpful commands:\n" >&2
+  printf "  lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,PARTUUID\n" >&2
+  printf "  sudo fdisk -l\n\n" >&2
+  
   read -r -p "Enter ESP disk (example: /dev/nvme0n1 or /dev/sda): " ESP_DISK
   read -r -p "Enter ESP partition number (example: 1): " ESP_PART
   [[ -b "$ESP_DISK" ]] || die "Not a block device: $ESP_DISK"
@@ -367,6 +375,9 @@ setup_shim_and_mokmanager() {
       warn "Couldn't auto-derive disk+part for efibootmgr; falling back to manual input."
       IFS='|' read -r ESP_DISK ESP_PART < <(pick_disk_part)
     fi
+
+    [[ "$ESP_DISK" == /dev/* ]] || die "Bad ESP_DISK from detection: '$ESP_DISK'"
+    [[ "$ESP_PART" =~ ^[0-9]+$ ]] || die "Bad ESP_PART from detection: '$ESP_PART'"
 
     sudo efibootmgr --unicode --disk "$ESP_DISK" --part "$ESP_PART" --create \
       --label "Shim" --loader '\EFI\BOOT\BOOTx64.EFI'
