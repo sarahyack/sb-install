@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+  echo "[ERR] Do not run this script as root. Run it as your normal user; it will use sudo when needed."
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HOOK_TEMPLATE="$SCRIPT_DIR/mkinitcpio-hook"
 ENV_FILE="$SCRIPT_DIR/env.sh"
@@ -38,11 +43,13 @@ sudo_once() {
   trap '[[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "${SUDO_KEEPALIVE_PID}" >/dev/null 2>&1 || true' EXIT
 }
 
-pacman_install() {
+yay_install() {
   local pkgs=("$@")
-  need_cmd pacman
-  say "Installing packages (if missing): ${pkgs[*]}"
-  sudo pacman -S --needed "${pkgs[@]}"
+  need_cmd yay
+  say "Installing packages (if missing) via yay: ${pkgs[*]}"
+
+  # Interactive by default. If you want fewer yay prompts, see note below.
+  yay -S --needed --noconfirm --answerclean None --answerdiff None "${pkgs[@]}"
 }
 
 backup_file() {
@@ -132,8 +139,8 @@ get_disk_part_for_efibootmgr() {
 
 detect_shim_paths() {
   local shim mm
-  shim="$(pacman -Ql shim-signed 2>/dev/null | awk '{print $2}' | grep -E '/shimx64\.efi$' | head -n1 || true)"
-  mm="$(pacman -Ql shim-signed 2>/dev/null | awk '{print $2}' | grep -E '/mmx64\.efi$' | head -n1 || true)"
+  shim="$(yay -Ql shim-signed 2>/dev/null | awk '{print $2}' | grep -E '/shimx64\.efi$' | head -n1 || true)"
+  mm="$(yay -Ql shim-signed 2>/dev/null | awk '{print $2}' | grep -E '/mmx64\.efi$' | head -n1 || true)"
   [[ -f "$shim" && -f "$mm" ]] || return 1
   printf '%s|%s\n' "$shim" "$mm"
 }
@@ -282,7 +289,7 @@ install_mkinitcpio_hook() {
 
 run_sbctl_flow() {
   say "sbctl workflow"
-  confirm "Install sbctl (pacman)?" 0 && pacman_install sbctl
+  confirm "Install sbctl (yay)?" 0 && yay_install sbctl
 
   say "sbctl status:"
   sudo sbctl status || true
@@ -330,7 +337,7 @@ setup_shim_and_mokmanager() {
   local esp="$1"
 
   say "Shim + MokManager setup on ESP: $esp"
-  confirm "Install shim-signed + efibootmgr?" 0 && pacman_install shim-signed efibootmgr
+  confirm "Install shim-signed + efibootmgr?" 0 && yay_install shim-signed efibootmgr
 
   sudo mkdir -p "$esp/EFI/BOOT"
   local shim_src mm_src
@@ -369,7 +376,7 @@ setup_shim_and_mokmanager() {
 sign_kernel_and_grub_with_mok() {
   local esp="$1"
   say "Sign kernel + GRUB EFI binaries with a Machine Owner Key (MOK)"
-  confirm "Install sbsigntools + openssl?" 0 && pacman_install sbsigntools openssl
+  confirm "Install sbsigntools + openssl?" 0 && yay_install sbsigntools openssl
 
   read -r -p "Where should MOK keys live? (default: /etc/secureboot/mok): " mok_dir
   mok_dir="${mok_dir:-/etc/secureboot/mok}"
@@ -429,7 +436,7 @@ sign_kernel_and_grub_with_mok() {
 reinstall_grub_with_modules_and_sign() {
   local esp="$1"
   say "Reinstall GRUB with GRUB_MODULES and sbat.csv, then sign + copy to fallback"
-  confirm "Install grub + sbsigntools?" 0 && pacman_install grub sbsigntools
+  confirm "Install grub + sbsigntools?" 0 && yay_install grub sbsigntools
 
   [[ -f /usr/share/grub/sbat.csv ]] || warn "Missing /usr/share/grub/sbat.csv (grub package should provide it)."
 
@@ -519,7 +526,7 @@ main() {
   case "$sel" in
     1)
       confirm "Install sbctl, shim-signed, sbsigntools, efibootmgr, grub, openssl?" 0 && \
-        pacman_install sbctl shim-signed sbsigntools efibootmgr grub openssl
+        yay_install sbctl shim-signed sbsigntools efibootmgr grub openssl
       ;;
     2)
       run_sbctl_flow
