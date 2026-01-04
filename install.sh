@@ -155,7 +155,14 @@ detect_shim_paths() {
 
 detect_grub_efi_candidates() {
   local esp="$1"
-  find "$esp/EFI" -maxdepth 3 -type f -iname 'grubx64.efi' 2>/dev/null | sort -u || true
+
+  # Search the whole ESP for likely GRUB EFI binaries.
+  # Prefer exact grubx64.efi/grub.efi, but allow *grub*.efi too.
+  sudo find "$esp" -maxdepth 6 -type f \( \
+      -iname 'grubx64.efi' -o -iname 'grub.efi' -o -iname '*grub*.efi' \
+    \) 2>/dev/null \
+    | grep -viE '/(shimx64|mmx64|fbx64|bootx64)\.efi$' \
+    | sort -u || true
 }
 
 choose_grub_efi() {
@@ -423,7 +430,19 @@ sign_kernel_and_grub_with_mok() {
 
   if confirm "Auto-select a grubx64.efi from the ESP and sign it now?" 0; then
     local grub_efi
-    grub_efi="$(choose_grub_efi "$esp")" || die "Couldn't find grubx64.efi on ESP."
+    grub_efi="$(choose_grub_efi "$esp" 2>/dev/null)" || true
+    if [[ -z "${grub_efi:-}" ]]; then
+      warn "Couldn't auto-find GRUB EFI on $esp."
+      read -r -p "Enter full path to the GRUB EFI to sign (or blank to skip): " grub_efi
+    fi
+
+    if [[ -n "${grub_efi:-}" ]]; then
+      sudo test -f "$grub_efi" || die "GRUB EFI not found: $grub_efi"
+      say "Selected GRUB EFI: $grub_efi"
+      sign_in_place "$MOK_KEY" "$MOK_CRT" "$grub_efi"
+    else
+      warn "Skipping GRUB signing."
+    fi
     say "Selected GRUB EFI: $grub_efi"
     sign_in_place "$MOK_KEY" "$MOK_CRT" "$grub_efi"
   else
