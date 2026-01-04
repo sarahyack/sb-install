@@ -184,9 +184,9 @@ choose_grub_efi() {
 
 sign_in_place() {
   local key="$1" cert="$2" target="$3"
-  [[ -f "$key" ]] || die "Key not found: $key"
-  [[ -f "$cert" ]] || die "Cert not found: $cert"
-  [[ -f "$target" ]] || die "Target not found: $target"
+  sudo test -f "$key" || die "Key not found: $key"
+  sudo test -f "$cert" || die "Cert not found: $cert"
+  sudo test -f "$target" || die "Target not found: $target"
 
   local tmp
   tmp="$(mktemp)"
@@ -399,7 +399,9 @@ sign_kernel_and_grub_with_mok() {
   local MOK_KEY="$mok_dir/MOK.key"
   local MOK_CRT="$mok_dir/MOK.crt"
   local MOK_CER="$mok_dir/MOK.cer"
-  [[ -f "$MOK_KEY" && -f "$MOK_CRT" && -f "$MOK_CER" ]] || die "Missing MOK files in $mok_dir"
+  sudo test -f "$MOK_KEY" || die "Missing MOK files in $mok_dir"
+  sudo test -f "$MOK_CRT" || die "Missing MOK files in $mok_dir"
+  sudo test -f "$MOK_CER" || die "Missing MOK files in $mok_dir"
 
   say "Kernel signing"
   echo "Common kernel paths:"
