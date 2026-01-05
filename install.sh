@@ -310,16 +310,38 @@ show_mok_fingerprint_report() {
   fi
 }
 
+choose_bootnum_from_list() {
+  local -a nums=("$@")
+  if (( ${#nums[@]} == 0 )); then
+    return 1
+  elif (( ${#nums[@]} == 1 )); then
+    printf '%s\n' "${nums[0]}"
+    return 0
+  else
+    echo "Multiple matching boot entries found:" >&2
+    local i
+    for i in "${!nums[@]}"; do
+      echo "  $((i+1))) Boot${nums[$i]}" >&2
+    done
+    read -r -p "Pick which one to use (number): " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] || return 2
+    (( choice >= 1 && choice <= ${#nums[@]} )) || return 2
+    printf '%s\n' "${nums[$((choice-1))]}"
+    return 0
+  fi
+}
+
 bootnums_for_label_and_loader() {
-  # Match BOTH label and the loader path in the Boot#### line
-  # Example loader_substr: '\EFI\BOOT\BOOTX64.EFI'
   local label="$1"
   local loader_substr="$2"
 
-  sudo efibootmgr 2>/dev/null | awk -v lbl="$label" -v ldr="$loader_substr" '
-    BEGIN { IGNORECASE=1 }
+  local lbl_lc ldr_lc
+  lbl_lc="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
+  ldr_lc="$(printf '%s' "$loader_substr" | tr '[:upper:]' '[:lower:]')"
+
+  sudo efibootmgr 2>/dev/null | awk -v lbl="$lbl_lc" -v ldr="$ldr_lc" '
     $1 ~ /^Boot[0-9A-Fa-f]{4}\*?$/ {
-      line=$0
+      line=tolower($0)
       if (index(line, lbl) && index(line, ldr)) {
         b=$1
         sub(/^Boot/,"",b); sub(/\*$/,"",b)
@@ -543,6 +565,7 @@ setup_shim_and_mokmanager() {
 
   if confirm "Create NVRAM boot entry for shim (label: Shim)?" 1; then
     local ESP_DISK ESP_PART
+    local shim_bootnum=""
 
     if IFS='|' read -r ESP_DISK ESP_PART < <(get_disk_part_for_efibootmgr "$esp"); then
       :
