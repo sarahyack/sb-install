@@ -535,7 +535,6 @@ setup_shim_and_mokmanager() {
   local shim_src mm_src
   IFS='|' read -r shim_src mm_src < <(detect_shim_paths || true)
 
-  # fallback to old defaults if detection failed
   shim_src="${shim_src:-/usr/share/shim-signed/shimx64.efi}"
   mm_src="${mm_src:-/usr/share/shim-signed/mmx64.efi}"
 
@@ -550,7 +549,7 @@ setup_shim_and_mokmanager() {
     say "Copied shim + MokManager."
   fi
 
-  if confirm "Create NVRAM boot entry for shim (efibootmgr)?" 1; then
+  if confirm "Create NVRAM boot entry for shim (label: Shim)?" 1; then
     local ESP_DISK ESP_PART
 
     if IFS='|' read -r ESP_DISK ESP_PART < <(get_disk_part_for_efibootmgr "$esp"); then
@@ -563,8 +562,38 @@ setup_shim_and_mokmanager() {
     [[ "$ESP_DISK" == /dev/* ]] || die "Bad ESP_DISK from detection: '$ESP_DISK'"
     [[ "$ESP_PART" =~ ^[0-9]+$ ]] || die "Bad ESP_PART from detection: '$ESP_PART'"
 
+    # Create entry (may create duplicates if user re-runs; we handle selection below)
     sudo efibootmgr --unicode --disk "$ESP_DISK" --part "$ESP_PART" --create \
       --label "Shim" --loader '\EFI\BOOT\BOOTx64.EFI'
+
+    # Find bootnum(s) for Shim label
+    local -a nums=()
+    mapfile -t nums < <(bootnums_for_label "Shim" || true)
+
+    local shim_bootnum=""
+    shim_bootnum="$(choose_bootnum_from_list "${nums[@]}" 2>/dev/null)" || true
+    if [[ -z "${shim_bootnum:-}" ]]; then
+      warn "Couldn't automatically find Boot#### for label 'Shim'."
+      warn "Run: sudo efibootmgr  (and set BootNext/BootOrder manually if needed)"
+      return 0
+    fi
+
+    say "Shim boot entry detected: Boot${shim_bootnum}"
+
+    # BootNext (one-time) — default YES
+    if confirm "Set Shim as NEXT boot only (BootNext)?" 0; then
+      set_bootnext "$shim_bootnum"
+    fi
+
+    # Permanent BootOrder — default NO
+    if confirm "Move Shim to the FRONT permanently (BootOrder)?" 1; then
+      set_bootorder_shim_first "$shim_bootnum"
+    fi
+
+    warn "Note: You can always manage boot order later in BIOS/UEFI, or via:"
+    echo "  sudo efibootmgr"
+    echo "  sudo efibootmgr -n $shim_bootnum           # one-time next boot"
+    echo "  sudo efibootmgr -o $shim_bootnum,<rest...> # permanent order"
   fi
 }
 
