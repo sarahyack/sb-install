@@ -38,7 +38,6 @@ export GRUB_MODULES="
 	part_msdos
 	part_gpt
 	password_pbkdf2
-	peimage
 	png
 	probe
 	reboot
