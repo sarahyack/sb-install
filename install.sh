@@ -332,17 +332,19 @@ choose_bootnum_from_list() {
 }
 
 bootnums_for_label_and_loader() {
+  # Match BOTH a label and a token that appears in the verbose line.
+  # Use a token like: "bootx64.efi" (no backslashes).
   local label="$1"
-  local loader_substr="$2"
+  local token="$2"
 
-  local lbl_lc ldr_lc
+  local lbl_lc tok_lc
   lbl_lc="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
-  ldr_lc="$(printf '%s' "$loader_substr" | tr '[:upper:]' '[:lower:]')"
+  tok_lc="$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')"
 
-  sudo efibootmgr 2>/dev/null | awk -v lbl="$lbl_lc" -v ldr="$ldr_lc" '
+  sudo efibootmgr -v 2>/dev/null | awk -v lbl="$lbl_lc" -v tok="$tok_lc" '
     $1 ~ /^Boot[0-9A-Fa-f]{4}\*?$/ {
       line=tolower($0)
-      if (index(line, lbl) && index(line, ldr)) {
+      if (index(line, lbl) && index(line, tok)) {
         b=$1
         sub(/^Boot/,"",b); sub(/\*$/,"",b)
         print toupper(b)
@@ -577,10 +579,8 @@ setup_shim_and_mokmanager() {
     [[ "$ESP_DISK" == /dev/* ]] || die "Bad ESP_DISK from detection: '$ESP_DISK'"
     [[ "$ESP_PART" =~ ^[0-9]+$ ]] || die "Bad ESP_PART from detection: '$ESP_PART'"
 
-    # Prefer reusing an existing Shim entry that points at the correct loader
-    local loader_path='File(\EFI\BOOT\BOOTX64.EFI)'
     local -a nums=()
-    mapfile -t nums < <(bootnums_for_label_and_loader "Shim" "$loader_path" || true)
+    mapfile -t nums < <(bootnums_for_label_and_loader "Shim" "bootx64.efi" || true)
 
     if (( ${#nums[@]} > 0 )); then
       local best=""
