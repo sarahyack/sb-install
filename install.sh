@@ -310,10 +310,18 @@ install_mkinitcpio_hook() {
 
   warn "The installed hook still contains placeholder paths (/path/to/MOK.key /path/to/MOK.crt)."
   if confirm "Do you want me to replace those placeholders now?" 0; then
+    local default_key="/etc/secureboot/mok/MOK.key"
+    local default_crt="/etc/secureboot/mok/MOK.crt"
+    local KEY_PATH CRT_PATH
+
     read -r -p "Enter full path to MOK.key (example: /etc/secureboot/mok/MOK.key): " KEY_PATH
+    KEY_PATH="${KEY_PATH:-$default_key}"
     read -r -p "Enter full path to MOK.crt (example: /etc/secureboot/mok/MOK.crt): " CRT_PATH
-    [[ -f "$KEY_PATH" ]] || die "Key not found: $KEY_PATH"
-    [[ -f "$CRT_PATH" ]] || die "Cert not found: $CRT_PATH"
+    CRT_PATH="${CRT_PATH:-$default_crt}"
+
+    sudo test -f "$KEY_PATH" || die "Key not found: $KEY_PATH"
+    sudo test -f "$CRT_PATH" || die "Cert not found: $CRT_PATH"
+
     # Escape slashes for sed
     local key_esc crt_esc
     key_esc="$(printf '%s' "$KEY_PATH" | sed 's/[\/&]/\\&/g')"
@@ -510,8 +518,8 @@ reinstall_grub_with_modules_and_sign() {
   read -r -p "Enter full path to MOK.key for signing GRUB (or blank to skip signing): " MOK_KEY
   if [[ -n "${MOK_KEY:-}" ]]; then
     read -r -p "Enter full path to MOK.crt for signing GRUB: " MOK_CRT
-    [[ -f "$MOK_KEY" ]] || die "Key not found: $MOK_KEY"
-    [[ -f "$MOK_CRT" ]] || die "Cert not found: $MOK_CRT"
+    sudo test -f "$MOK_KEY" || die "Key not found: $MOK_KEY"
+    sudo test -f "$MOK_CRT" || die "Cert not found: $MOK_CRT"
 
     local grub_efi
     grub_efi="$(choose_grub_efi "$esp")" || die "Couldn't find grubx64.efi on ESP after grub-install."
@@ -519,7 +527,7 @@ reinstall_grub_with_modules_and_sign() {
     local fallback_dir="$esp/EFI/BOOT"
     local fallback_grub="$fallback_dir/grubx64.efi"
 
-    [[ -f "$grub_efi" ]] || die "Expected GRUB EFI not found: $grub_efi"
+    sudo test -f "$grub_efi" || die "Expected GRUB EFI not found: $grub_efi"
 
     if confirm "Sign $grub_efi in-place with sbsign?" 1; then
       sign_in_place "$MOK_KEY" "$MOK_CRT" "$grub_efi"
