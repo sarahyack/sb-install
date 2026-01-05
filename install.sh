@@ -310,37 +310,29 @@ show_mok_fingerprint_report() {
   fi
 }
 
-bootnums_for_label() {
-  # Prints matching Boot#### numbers (hex) for a given label (e.g. "Shim")
-  # Example line: Boot0007* Shim
+bootnums_for_label_and_loader() {
+  # Match BOTH label and the loader path in the Boot#### line
+  # Example loader_substr: '\EFI\BOOT\BOOTX64.EFI'
   local label="$1"
-  sudo efibootmgr 2>/dev/null \
-    | awk -v lbl="$label" '
-        $1 ~ /^Boot[0-9A-Fa-f]{4}\*?$/ && $2 == lbl {
-          b=$1; sub(/^Boot/,"",b); sub(/\*$/,"",b); print b
-        }'
+  local loader_substr="$2"
+
+  sudo efibootmgr 2>/dev/null | awk -v lbl="$label" -v ldr="$loader_substr" '
+    BEGIN { IGNORECASE=1 }
+    $1 ~ /^Boot[0-9A-Fa-f]{4}\*?$/ {
+      line=$0
+      if (index(line, lbl) && index(line, ldr)) {
+        b=$1
+        sub(/^Boot/,"",b); sub(/\*$/,"",b)
+        print toupper(b)
+      }
+    }'
 }
 
-choose_bootnum_from_list() {
-  # If multiple Boot#### match, let user pick
+choose_highest_bootnum() {
+  # Picks “newest-ish” by highest Boot#### (efibootmgr allocates increasing numbers)
   local -a nums=("$@")
-  if (( ${#nums[@]} == 0 )); then
-    return 1
-  elif (( ${#nums[@]} == 1 )); then
-    printf '%s\n' "${nums[0]}"
-    return 0
-  else
-    echo "Multiple matching boot entries found:" >&2
-    local i
-    for i in "${!nums[@]}"; do
-      echo "  $((i+1))) Boot${nums[$i]}" >&2
-    done
-    read -r -p "Pick which one to use (number): " choice
-    [[ "$choice" =~ ^[0-9]+$ ]] || return 2
-    (( choice >= 1 && choice <= ${#nums[@]} )) || return 2
-    printf '%s\n' "${nums[$((choice-1))]}"
-    return 0
-  fi
+  ((${#nums[@]}==0)) && return 1
+  printf '%s\n' "${nums[@]}" | tr '[:lower:]' '[:upper:]' | sort | tail -n1
 }
 
 set_bootnext() {
@@ -553,7 +545,7 @@ setup_shim_and_mokmanager() {
     local ESP_DISK ESP_PART
 
     if IFS='|' read -r ESP_DISK ESP_PART < <(get_disk_part_for_efibootmgr "$esp"); then
-      : # autodetect succeeded
+      :
     else
       warn "Couldn't auto-derive disk+part for efibootmgr; falling back to manual input."
       IFS='|' read -r ESP_DISK ESP_PART < <(pick_disk_part)
@@ -562,23 +554,36 @@ setup_shim_and_mokmanager() {
     [[ "$ESP_DISK" == /dev/* ]] || die "Bad ESP_DISK from detection: '$ESP_DISK'"
     [[ "$ESP_PART" =~ ^[0-9]+$ ]] || die "Bad ESP_PART from detection: '$ESP_PART'"
 
-    # Create entry (may create duplicates if user re-runs; we handle selection below)
-    sudo efibootmgr --unicode --disk "$ESP_DISK" --part "$ESP_PART" --create \
-      --label "Shim" --loader '\EFI\BOOT\BOOTx64.EFI'
-
-    # Find bootnum(s) for Shim label
+    # Prefer reusing an existing Shim entry that points at the correct loader
+    local loader_path='File(\EFI\BOOT\BOOTX64.EFI)'
     local -a nums=()
-    mapfile -t nums < <(bootnums_for_label "Shim" || true)
+    mapfile -t nums < <(bootnums_for_label_and_loader "Shim" "$loader_path" || true)
 
-    local shim_bootnum=""
-    shim_bootnum="$(choose_bootnum_from_list "${nums[@]}" 2>/dev/null)" || true
-    if [[ -z "${shim_bootnum:-}" ]]; then
-      warn "Couldn't automatically find Boot#### for label 'Shim'."
-      warn "Run: sudo efibootmgr  (and set BootNext/BootOrder manually if needed)"
-      return 0
+    if (( ${#nums[@]} > 0 )); then
+      local best=""
+      best="$(choose_highest_bootnum "${nums[@]}" || true)"
+      echo
+      echo "Found existing Shim boot entries that already point at BOOTX64.EFI:"
+      printf '  - Boot%s\n' "${nums[@]}"
+      echo
+      if [[ -n "$best" ]] && confirm "Reuse newest-looking one (Boot$best)?" 0; then
+        shim_bootnum="$best"
+      else
+        shim_bootnum="$(choose_bootnum_from_list "${nums[@]}")" || die "No Shim entry selected."
+      fi
+    else
+      # Create entry only if none exists that matches the loader path
+      say "No existing matching Shim entry found; creating a new one."
+      sudo efibootmgr --unicode --disk "$ESP_DISK" --part "$ESP_PART" --create \
+        --label "Shim" --loader '\EFI\BOOT\BOOTX64.EFI'
+
+      # Re-scan after creation
+      mapfile -t nums < <(bootnums_for_label_and_loader "Shim" "$loader_path" || true)
+      (( ${#nums[@]} > 0 )) || die "Created Shim entry, but couldn't detect it via efibootmgr output."
+
+      shim_bootnum="$(choose_highest_bootnum "${nums[@]}")" || shim_bootnum="${nums[0]}"
+      say "Using Shim boot entry: Boot${shim_bootnum}"
     fi
-
-    say "Shim boot entry detected: Boot${shim_bootnum}"
 
     # BootNext (one-time) — default YES
     if confirm "Set Shim as NEXT boot only (BootNext)?" 0; then
@@ -673,6 +678,7 @@ sign_kernel_and_grub_with_mok() {
 reinstall_grub_with_modules_and_sign() {
   local esp="$1"
   say "Reinstall GRUB with GRUB_MODULES and sbat.csv, then sign + copy to fallback"
+
   confirm "Install grub + sbsigntools?" 0 && yay_install grub sbsigntools
 
   [[ -f /usr/share/grub/sbat.csv ]] || warn "Missing /usr/share/grub/sbat.csv (grub package should provide it)."
@@ -680,42 +686,76 @@ reinstall_grub_with_modules_and_sign() {
   read -r -p "GRUB bootloader-id (default: GRUB): " grub_id
   grub_id="${grub_id:-GRUB}"
 
-  local modules_norm="$(printf '%s' "$GRUB_MODULES" | tr '\n\t' '  ' | xargs)"
+  local modules_norm
+  modules_norm="$(printf '%s' "$GRUB_MODULES" | tr '\n\t' '  ' | xargs)"
 
   warn "About to run grub-install with a large module list (GRUB_MODULES) and sbat.csv."
   if confirm "Run grub-install now?" 1; then
-    sudo grub-install --target=x86_64-efi --efi-directory="$esp" --bootloader-id="$grub_id" --modules="$modules_norm" --sbat /usr/share/grub/sbat.csv
+    sudo grub-install \
+      --target=x86_64-efi \
+      --efi-directory="$esp" \
+      --bootloader-id="$grub_id" \
+      --modules="$modules_norm" \
+      --sbat /usr/share/grub/sbat.csv
     say "grub-install completed."
   fi
 
+  # Paths we care about (vendor + fallback)
+  local grub_efi_expected="$esp/EFI/$grub_id/grubx64.efi"
+  local fallback_dir="$esp/EFI/BOOT"
+  local fallback_grub="$fallback_dir/grubx64.efi"
+  local fallback_grub_uc="$fallback_dir/GRUBX64.EFI"
+
   # Ask for MOK location to sign grub
   read -r -p "Enter full path to MOK.key for signing GRUB (or blank to skip signing): " MOK_KEY
-  if [[ -n "${MOK_KEY:-}" ]]; then
-    read -r -p "Enter full path to MOK.crt for signing GRUB: " MOK_CRT
-    sudo test -f "$MOK_KEY" || die "Key not found: $MOK_KEY"
-    sudo test -f "$MOK_CRT" || die "Cert not found: $MOK_CRT"
-
-    local grub_efi
-    grub_efi="$(choose_grub_efi "$esp")" || die "Couldn't find grubx64.efi on ESP after grub-install."
-    say "Using GRUB EFI: $grub_efi"
-    local fallback_dir="$esp/EFI/BOOT"
-    local fallback_grub="$fallback_dir/grubx64.efi"
-
-    sudo test -f "$grub_efi" || die "Expected GRUB EFI not found: $grub_efi"
-
-    if confirm "Sign $grub_efi in-place with sbsign?" 1; then
-      sign_in_place "$MOK_KEY" "$MOK_CRT" "$grub_efi"
-    fi
-
-    if confirm "Copy signed GRUB to fallback path ($fallback_grub)?" 0; then
-      sudo mkdir -p "$fallback_dir"
-      backup_file "$fallback_grub" "$fallback_dir/backup"
-      sudo cp -f "$grub_efi" "$fallback_grub"
-      say "Copied to fallback: $fallback_grub"
-    fi
-  else
+  if [[ -z "${MOK_KEY:-}" ]]; then
     warn "Skipping GRUB signing because you didn't provide MOK.key."
+    return 0
   fi
+
+  read -r -p "Enter full path to MOK.crt for signing GRUB: " MOK_CRT
+  sudo test -f "$MOK_KEY" || die "Key not found: $MOK_KEY"
+  sudo test -f "$MOK_CRT" || die "Cert not found: $MOK_CRT"
+
+  # Prefer the known installed path; only fallback to search if it's missing
+  local grub_efi="$grub_efi_expected"
+  if ! sudo test -f "$grub_efi"; then
+    warn "Expected $grub_efi_expected not found; falling back to searching the ESP."
+    grub_efi="$(choose_grub_efi "$esp")" || die "Couldn't find a GRUB EFI binary on ESP."
+  fi
+  sudo test -f "$grub_efi" || die "GRUB EFI not found: $grub_efi"
+
+  say "Using GRUB EFI: $grub_efi"
+
+  if confirm "Sign this GRUB EFI in-place with sbsign?" 1; then
+    sign_in_place "$MOK_KEY" "$MOK_CRT" "$grub_efi"
+    say "Signature check (vendor GRUB):"
+    sudo sbverify --list "$grub_efi" || warn "sbverify failed on $grub_efi"
+  else
+    warn "You chose not to sign vendor GRUB. Secure Boot will almost certainly fail unless it's already signed/trusted."
+  fi
+
+  # Copy to fallback (this is what shim-in-BOOT usually chains to)
+  if confirm "Copy the (signed) GRUB to fallback path ($fallback_grub)?" 0; then
+    sudo mkdir -p "$fallback_dir"
+    backup_file "$fallback_grub" "$fallback_dir/backup"
+    sudo cp -f "$grub_efi" "$fallback_grub"
+    say "Copied to fallback: $fallback_grub"
+
+    # Optional: also create uppercase twin (harmless, sometimes reduces confusion)
+    if confirm "Also copy to ($fallback_grub_uc) as a duplicate?" 1; then
+      backup_file "$fallback_grub_uc" "$fallback_dir/backup"
+      sudo cp -f "$grub_efi" "$fallback_grub_uc"
+      say "Copied to fallback (uppercase): $fallback_grub_uc"
+    fi
+
+    say "Signature check (fallback GRUB):"
+    sudo sbverify --list "$fallback_grub" || warn "sbverify failed on $fallback_grub"
+  fi
+
+  warn "Reminder: your firmware must boot the Shim entry first (or BootNext=Shim)."
+  echo "Check quickly with:"
+  echo "  sudo efibootmgr -v"
 }
 
 final_instructions() {
