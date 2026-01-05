@@ -474,8 +474,6 @@ sign_kernel_and_grub_with_mok() {
     else
       warn "Skipping GRUB signing."
     fi
-    say "Selected GRUB EFI: $grub_efi"
-    sign_in_place "$MOK_KEY" "$MOK_CRT" "$grub_efi"
   else
     warn "Skipping GRUB signing in this step."
     warn "If you want to sign manually later, run option 4 again or use option 6 (GRUB reinstall + signing)."
