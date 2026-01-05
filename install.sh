@@ -383,6 +383,26 @@ set_bootorder_shim_first() {
   say "BootOrder updated: Shim entry Boot$bootnum moved to the front."
 }
 
+patch_grub_font_for_secureboot() {
+  local f="/etc/default/grub"
+  say "Patching $f to avoid disk-loaded fonts under Secure Boot (use built-in font behavior)"
+
+  sudo test -f "$f" || die "Missing: $f"
+  backup_file "$f" "/etc/default/grub.backup"
+
+  # If GRUB_FONT exists, force it empty. If it doesn't exist, add an empty one.
+  if sudo grep -Eq '^\s*GRUB_FONT=' "$f"; then
+    sudo sed -i -E 's|^\s*GRUB_FONT=.*$|GRUB_FONT=|g' "$f"
+  else
+    echo "GRUB_FONT=" | sudo tee -a "$f" >/dev/null
+  fi
+
+  # Rebuild grub.cfg (Arch/EndeavourOS standard path)
+  need_cmd grub-mkconfig
+  sudo grub-mkconfig -o /boot/grub/grub.cfg
+  say "Regenerated: /boot/grub/grub.cfg"
+}
+
 show_intro() {
   cat <<'TXT'
 
@@ -721,6 +741,10 @@ reinstall_grub_with_modules_and_sign() {
       --modules="$modules_norm" \
       --sbat /usr/share/grub/sbat.csv
     say "grub-install completed."
+  fi
+
+  if confirm "Apply Secure Boot font fix (clear GRUB_FONT + regenerate grub.cfg)?" -1; then
+    patch_grub_font_for_secureboot
   fi
 
   # Paths we care about (vendor + fallback)
