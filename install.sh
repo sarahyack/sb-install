@@ -664,7 +664,7 @@ sign_kernel_and_grub_with_mok() {
 
   if confirm "Auto-select a grubx64.efi from the ESP and sign it now?" 0; then
     local grub_efi
-    grub_efi="$(choose_grub_efi "$esp" 2>/dev/null)" || true
+    grub_efi="$(choose_grub_efi "$esp")" || true
     if [[ -z "${grub_efi:-}" ]]; then
       warn "Couldn't auto-find GRUB EFI on $esp."
       read -r -p "Enter full path to the GRUB EFI to sign (or blank to skip): " grub_efi
