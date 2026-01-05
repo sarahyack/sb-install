@@ -476,9 +476,9 @@ install_mkinitcpio_hook() {
     local default_crt="/etc/secureboot/mok/MOK.crt"
     local KEY_PATH CRT_PATH
 
-    read -r -p "Enter full path to MOK.key (example: /etc/secureboot/mok/MOK.key): " KEY_PATH
+    read -r -p "Enter full path to MOK.key (default: /etc/secureboot/mok/MOK.key): " KEY_PATH
     KEY_PATH="${KEY_PATH:-$default_key}"
-    read -r -p "Enter full path to MOK.crt (example: /etc/secureboot/mok/MOK.crt): " CRT_PATH
+    read -r -p "Enter full path to MOK.crt (default: /etc/secureboot/mok/MOK.crt): " CRT_PATH
     CRT_PATH="${CRT_PATH:-$default_crt}"
 
     sudo test -f "$KEY_PATH" || die "Key not found: $KEY_PATH"
