@@ -205,7 +205,7 @@ sign_in_place() {
   # Temp file on SAME filesystem as target (ESP-safe)
   tmp="$(sudo mktemp --tmpdir="$dir" ".${base}.sbsign.${ts}.XXXXXX")" \
     || die "mktemp failed in $dir"
-  bak="${dir}/${base}.presign.${ts}.bak"
+  bak="${dir}/backups/${base}.presign.${ts}.bak"
 
   say "Signing: $target"
   sudo sbsign --key "$key" --cert "$cert" --output "$tmp" "$target"
