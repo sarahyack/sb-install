@@ -8,7 +8,7 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-HOOK_TEMPLATE="$SCRIPT_DIR/mkinitcpio-hook"
+HOOK_TEMPLATE="$SCRIPT_DIR/mkinitcpio-hook.sh"
 ENV_FILE="$SCRIPT_DIR/env.sh"
 
 say() { printf "\n==> %s\n" "$*"; }
