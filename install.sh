@@ -59,7 +59,7 @@ backup_file() {
   base="$(basename -- "$path")"
   if [[ -e "$path" ]]; then
     sudo mkdir -p "$backup_dir"
-    sudo cp -a "$path" "$backup_dir/${base}.$(date +%Y%m%d-%H%M%S).bak"
+    sudo cp -f "$path" "$backup_dir/${base}.$(date +%Y%m%d-%H%M%S).bak"
   fi
 }
 
@@ -232,6 +232,141 @@ extract_sbctl_paths() {
   sed -nE 's/.*(\/[^[:space:]]+).*/\1/p' | sort -u
 }
 
+cert_fpr_sha256() {
+  # Prints SHA256 fingerprint with no colons (portable for comparisons)
+  # Works for PEM (.crt) and DER (.cer).
+  local path="$1"
+  local inform="PEM"
+  [[ "$path" =~ \.cer$ ]] && inform="DER"
+  sudo openssl x509 -inform "$inform" -in "$path" -noout -fingerprint -sha256 2>/dev/null \
+    | sed -E 's/^.*=//; s/://g'
+}
+
+show_mok_fingerprint_report() {
+  # Shows fingerprints for the "base" (mok_dir) and any ESP copies,
+  # and prints a recommendation about overwriting.
+  local mok_dir="$1"
+  local esp="${2:-}"
+
+  local crt="$mok_dir/MOK.crt"
+  local cer="$mok_dir/MOK.cer"
+
+  say "MOK fingerprint check (SHA256)"
+  if sudo test -f "$crt"; then
+    echo "  Base CRT: $crt"
+    echo "    -> $(cert_fpr_sha256 "$crt" || echo "unreadable")"
+  else
+    echo "  Base CRT: (missing) $crt"
+  fi
+
+  if sudo test -f "$cer"; then
+    echo "  Base CER: $cer"
+    echo "    -> $(cert_fpr_sha256 "$cer" || echo "unreadable")"
+  else
+    echo "  Base CER: (missing) $cer"
+  fi
+
+  # Compare base crt vs base cer (they SHOULD match)
+  if sudo test -f "$crt" && sudo test -f "$cer"; then
+    local f_crt f_cer
+    f_crt="$(cert_fpr_sha256 "$crt" || true)"
+    f_cer="$(cert_fpr_sha256 "$cer" || true)"
+    if [[ -n "$f_crt" && -n "$f_cer" && "$f_crt" == "$f_cer" ]]; then
+      echo "  Base CRT vs CER: MATCH ✅"
+    else
+      echo "  Base CRT vs CER: MISMATCH ❌ (this is a red flag)"
+    fi
+  fi
+
+  # ESP copies (optional)
+  if [[ -n "${esp:-}" && -d "$esp" ]]; then
+    local esp_root="$esp/MOK.cer"
+    local esp_boot="$esp/EFI/BOOT/MOK.cer"
+
+    if sudo test -f "$esp_root"; then
+      echo "  ESP copy : $esp_root"
+      echo "    -> $(cert_fpr_sha256 "$esp_root" || echo "unreadable")"
+    fi
+    if sudo test -f "$esp_boot"; then
+      echo "  ESP copy : $esp_boot"
+      echo "    -> $(cert_fpr_sha256 "$esp_boot" || echo "unreadable")"
+    fi
+
+    # Recommend overwrite behavior if we can compare
+    if sudo test -f "$cer" && sudo test -f "$esp_root"; then
+      local f_base f_esp
+      f_base="$(cert_fpr_sha256 "$cer" || true)"
+      f_esp="$(cert_fpr_sha256 "$esp_root" || true)"
+      if [[ -n "$f_base" && -n "$f_esp" && "$f_base" == "$f_esp" ]]; then
+        echo
+        echo "  Recommendation: ESP MOK.cer MATCHES your base MOK.cer ✅"
+        echo "  -> Do NOT overwrite keys. Answer NO to overwrite prompts."
+      else
+        echo
+        echo "  Recommendation: ESP MOK.cer DOES NOT match base MOK.cer ❌"
+        echo "  -> If you overwrite keys, you MUST copy the NEW MOK.cer to the ESP and enroll THAT one."
+      fi
+    fi
+  fi
+}
+
+bootnums_for_label() {
+  # Prints matching Boot#### numbers (hex) for a given label (e.g. "Shim")
+  # Example line: Boot0007* Shim
+  local label="$1"
+  sudo efibootmgr 2>/dev/null \
+    | awk -v lbl="$label" '
+        $1 ~ /^Boot[0-9A-Fa-f]{4}\*?$/ && $2 == lbl {
+          b=$1; sub(/^Boot/,"",b); sub(/\*$/,"",b); print b
+        }'
+}
+
+choose_bootnum_from_list() {
+  # If multiple Boot#### match, let user pick
+  local -a nums=("$@")
+  if (( ${#nums[@]} == 0 )); then
+    return 1
+  elif (( ${#nums[@]} == 1 )); then
+    printf '%s\n' "${nums[0]}"
+    return 0
+  else
+    echo "Multiple matching boot entries found:" >&2
+    local i
+    for i in "${!nums[@]}"; do
+      echo "  $((i+1))) Boot${nums[$i]}" >&2
+    done
+    read -r -p "Pick which one to use (number): " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] || return 2
+    (( choice >= 1 && choice <= ${#nums[@]} )) || return 2
+    printf '%s\n' "${nums[$((choice-1))]}"
+    return 0
+  fi
+}
+
+set_bootnext() {
+  local bootnum="$1"
+  sudo efibootmgr -n "$bootnum"
+  say "BootNext set: next reboot will try Boot$bootnum (one-time)."
+}
+
+set_bootorder_shim_first() {
+  local bootnum="$1"
+  local cur
+  cur="$(sudo efibootmgr | awk -F': ' '/^BootOrder:/ {print $2; exit}')"
+  [[ -n "$cur" ]] || die "Couldn't read current BootOrder."
+
+  IFS=',' read -r -a arr <<< "$cur"
+  local -a new=("$bootnum")
+  local x
+  for x in "${arr[@]}"; do
+    [[ "$x" == "$bootnum" ]] && continue
+    new+=("$x")
+  done
+
+  sudo efibootmgr -o "$(IFS=,; echo "${new[*]}")"
+  say "BootOrder updated: Shim entry Boot$bootnum moved to the front."
+}
+
 show_intro() {
   cat <<'TXT'
 
@@ -275,13 +410,23 @@ pick_disk_part() {
 
 mk_mok_keys() {
   local mok_dir="$1"
+  local esp="${2:-}"
+
   say "Creating Machine Owner Key (RSA 2048) in: $mok_dir"
   sudo mkdir -p "$mok_dir"
   sudo chmod 700 "$mok_dir"
 
+  # If keys exist, show fingerprints BEFORE asking about overwrite
   if [[ -f "$mok_dir/MOK.key" || -f "$mok_dir/MOK.crt" || -f "$mok_dir/MOK.cer" ]]; then
     warn "MOK.* already exists in $mok_dir"
-    confirm "Overwrite existing MOK.* files?" 1 || { say "Keeping existing keys."; return 0; }
+    show_mok_fingerprint_report "$mok_dir" "$esp"
+    echo
+    echo "If the fingerprints match what you expect/enrolled, you should NOT overwrite."
+    echo "Overwriting means you'll need to enroll the NEW MOK.cer in MokManager."
+    echo
+
+    # Default should be NO (safer)
+    confirm "Overwrite existing MOK.* files in $mok_dir ?" 1 || { say "Keeping existing keys."; return 0; }
     sudo rm -f "$mok_dir/MOK.key" "$mok_dir/MOK.crt" "$mok_dir/MOK.cer"
   fi
 
@@ -298,6 +443,7 @@ mk_mok_keys() {
   sudo chmod 644 "$mok_dir/MOK.crt" "$mok_dir/MOK.cer"
 
   say "Created: $mok_dir/MOK.key, MOK.crt, MOK.cer"
+  show_mok_fingerprint_report "$mok_dir" "$esp"
 }
 
 install_mkinitcpio_hook() {
@@ -431,7 +577,7 @@ sign_kernel_and_grub_with_mok() {
   mok_dir="${mok_dir:-/etc/secureboot/mok}"
 
   if confirm "Create (or reuse) MOK keys in $mok_dir ?" 0; then
-    mk_mok_keys "$mok_dir"
+    mk_mok_keys "$mok_dir" "$esp"
   fi
 
   local MOK_KEY="$mok_dir/MOK.key"
@@ -480,6 +626,7 @@ sign_kernel_and_grub_with_mok() {
   fi
 
   say "Copy MOK.cer to ESP so MokManager can enroll it from disk"
+  show_mok_fingerprint_report "$mok_dir" "$esp"
   if confirm "Copy $MOK_CER onto the ESP root and ESP/EFI/BOOT ?" 0; then
     sudo cp -f "$MOK_CER" "$esp/MOK.cer"
     sudo cp -f "$MOK_CER" "$esp/EFI/BOOT/MOK.cer" || true
