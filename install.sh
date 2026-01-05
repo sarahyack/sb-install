@@ -191,15 +191,38 @@ choose_grub_efi() {
 
 sign_in_place() {
   local key="$1" cert="$2" target="$3"
-  sudo test -f "$key" || die "Key not found: $key"
-  sudo test -f "$cert" || die "Cert not found: $cert"
-  sudo test -f "$target" || die "Target not found: $target"
 
-  local tmp
-  tmp="$(mktemp)"
+  # Existence/readability checks that work with root-only dirs
+  sudo test -r "$key"   || die "Can't read key (need sudo?): $key"
+  sudo test -r "$cert"  || die "Can't read cert (need sudo?): $cert"
+  sudo test -f "$target"|| die "Target not found: $target"
+
+  local dir base ts tmp bak
+  dir="$(dirname -- "$target")"
+  base="$(basename -- "$target")"
+  ts="$(date +%Y%m%d-%H%M%S)"
+
+  # Temp file on SAME filesystem as target (ESP-safe)
+  tmp="$(sudo mktemp --tmpdir="$dir" ".${base}.sbsign.${ts}.XXXXXX")" \
+    || die "mktemp failed in $dir"
+  bak="${dir}/${base}.presign.${ts}.bak"
+
   say "Signing: $target"
   sudo sbsign --key "$key" --cert "$cert" --output "$tmp" "$target"
-  sudo cp -a "$target" "$target.presign.$(date +%Y%m%d-%H%M%S).bak"
+
+  # HARD SAFETY CHECKS so we never clobber target with junk/empty
+  sudo test -s "$tmp" || { sudo rm -f "$tmp"; die "sbsign produced empty output for $target"; }
+
+  # sbverify is part of sbsigntools; confirms PE/COFF signature structure
+  if ! sudo sbverify --list "$tmp" >/dev/null 2>&1; then
+    sudo rm -f "$tmp"
+    die "Signed output doesn't look like a PE/COFF EFI binary (sbverify failed): $target"
+  fi
+
+  # Backup without -a (VFAT doesn't do ownership properly)
+  sudo cp -f "$target" "$bak" || warn "Backup failed: $bak"
+
+  # Atomic-ish replace (rename within same dir/filesystem)
   sudo mv -f "$tmp" "$target"
 }
 
