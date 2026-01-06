@@ -8,7 +8,11 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-HOOK_TEMPLATE="$SCRIPT_DIR/mkinitcpio-hook.sh"
+GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone.hook"
+SIGNING_HOOK_TEMPLATE="$SCRIPT_DIR/mkinitcpio-hook.sh"
+WATCHER_SCRIPT_TEMPLATE="$SCRIPT_DIR/grub-standalone-watch.sh"
+WATCHER_SERVICE_TEMPLATE="$SCRIPT_DIR/grub-standalone-watch.service"
+STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/build-grub-standalone.sh"
 ENV_FILE="$SCRIPT_DIR/env.sh"
 
 say() { printf "\n==> %s\n" "$*"; }
@@ -203,8 +207,9 @@ sign_in_place() {
   ts="$(date +%Y%m%d-%H%M%S)"
 
   # Temp file on SAME filesystem as target (ESP-safe)
-  tmp="$(sudo mktemp --tmpdir="$dir" ".${base}.sbsign.${ts}.XXXXXX")" \
-    || die "mktemp failed in $dir"
+  sudo mkdir -p "$dir/backups"
+  tmp="$(sudo mktemp --tmpdir="$dir/backups" ".${base}.sbsign.${ts}.XXXXXX")" \
+    || die "mktemp failed in $dir/backups"
   bak="${dir}/backups/${base}.presign.${ts}.bak"
 
   say "Signing: $target"
@@ -483,11 +488,11 @@ mk_mok_keys() {
 }
 
 install_mkinitcpio_hook() {
-  [[ -f "$HOOK_TEMPLATE" ]] || die "Missing template: $HOOK_TEMPLATE"
+  [[ -f "$SIGNING_HOOK_TEMPLATE" ]] || die "Missing template: $SIGNING_HOOK_TEMPLATE"
 
   say "Installing mkinitcpio post hook to /etc/initcpio/post/kernel-sbsign"
   sudo mkdir -p /etc/initcpio/post
-  sudo cp -f "$HOOK_TEMPLATE" /etc/initcpio/post/kernel-sbsign
+  sudo cp -f "$SIGNING_HOOK_TEMPLATE" /etc/initcpio/post/kernel-sbsign
   sudo chmod +x /etc/initcpio/post/kernel-sbsign
 
   warn "The installed hook still contains placeholder paths (/path/to/MOK.key /path/to/MOK.crt)."
@@ -621,7 +626,7 @@ setup_shim_and_mokmanager() {
         --label "Shim" --loader '\EFI\BOOT\BOOTX64.EFI'
 
       # Re-scan after creation
-      mapfile -t nums < <(bootnums_for_label_and_loader "Shim" "$loader_path" || true)
+      mapfile -t nums < <(bootnums_for_label_and_loader "Shim" "bootx64.efi" || true)
       (( ${#nums[@]} > 0 )) || die "Created Shim entry, but couldn't detect it via efibootmgr output."
 
       shim_bootnum="$(choose_highest_bootnum "${nums[@]}")" || shim_bootnum="${nums[0]}"
@@ -805,6 +810,98 @@ reinstall_grub_with_modules_and_sign() {
   echo "  sudo efibootmgr -v"
 }
 
+install_grub_standalone_maintenance() {
+  local esp="$1"
+
+  [[ -f "$STANDALONE_GRUB_BUILDER" ]] || die "Missing template: $STANDALONE_GRUB_BUILDER"
+  [[ -f "$GRUB_HOOK_TEMPLATE" ]] || die "Missing template: $GRUB_HOOK_TEMPLATE"
+
+  confirm "Install grub + sbsigntools + inotify-tools (standalone build + watcher)?" 0 && yay_install grub sbsigntools inotify-tools
+
+  # Detect ESP device for hook-time mounts
+  local esp_dev
+  esp_dev="$(esp_device_from_mount "$esp")" || die "Couldn't detect ESP device from mount: $esp"
+  if [[ "$esp_dev" == UUID=* ]]; then
+    uuid="${esp_dev#UUID=}"
+    esp_dev="$(blkid -U "$uuid" 2>/dev/null || true)"
+  fi
+  esp_dev="$(readlink -f -- "$esp_dev" 2>/dev/null || printf '%s' "$esp_dev")"
+  [[ -b "$esp_dev" ]] || die "ESP device isn't a block device: $esp_dev"
+
+  read -r -p "GRUB ID on ESP (default: GRUB): " grub_id
+  grub_id="${grub_id:-GRUB}"
+
+  local mok_key_def="/etc/secureboot/mok/MOK.key"
+  local mok_crt_def="/etc/secureboot/mok/MOK.crt"
+  read -r -p "MOK.key path (default: $mok_key_def): " mok_key
+  mok_key="${mok_key:-$mok_key_def}"
+  read -r -p "MOK.crt path (default: $mok_crt_def): " mok_crt
+  mok_crt="${mok_crt:-$mok_crt_def}"
+
+  sudo test -r "$mok_key" || die "Can't read: $mok_key"
+  sudo test -r "$mok_crt" || die "Can't read: $mok_crt"
+
+  local theme_dir_def="/boot/grub/themes/starfield"
+  read -r -p "Theme dir to embed (default: $theme_dir_def): " theme_dir
+  theme_dir="${theme_dir:-$theme_dir_def}"
+  [[ -d "$theme_dir" ]] || theme_dir=""
+
+  local splash_def="/usr/share/endeavouros/splash.png"
+  read -r -p "Background splash PNG to embed (default: $splash_def): " splash_src
+  splash_src="${splash_src:-$splash_def}"
+  [[ -r "$splash_src" ]] || splash_src=""
+
+  # Build modules string: your env.sh GRUB_MODULES + required theme bits
+  local modules_norm extras modules_final
+  modules_norm="$(printf '%s' "$GRUB_MODULES" | tr '\n\t' '  ' | xargs)"
+  extras="font gfxterm gfxterm_background gfxmenu png gettext all_video efi_gop efi_uga"
+
+  # de-dup
+  modules_final="$(
+    printf '%s %s\n' "$modules_norm" "$extras" \
+      | tr ' ' '\n' \
+      | awk 'NF && !seen[$0]++' \
+      | paste -sd' ' -
+  )"
+
+  say "Installing builder to /usr/local/sbin/grub-standalone-rebuild.sh"
+  sudo install -D -m 0755 "$STANDALONE_GRUB_BUILDER" /usr/local/sbin/grub-standalone-rebuild.sh
+
+  say "Installing pacman hook to /etc/pacman.d/hooks/99-grub-standalone.hook"
+  sudo install -D -m 0644 "$GRUB_HOOK_TEMPLATE" /etc/pacman.d/hooks/99-grub-standalone.hook
+
+  say "Installing recursive watch script + service (manual edits trigger rebuilds)"
+  [[ -f "$WATCHER_SCRIPT_TEMPLATE" ]] || die "Missing template: $WATCHER_SCRIPT_TEMPLATE"
+  [[ -f "$WATCHER_SERVICE_TEMPLATE" ]] || die "Missing template: $WATCHER_SERVICE_TEMPLATE"
+  sudo install -D -m 0755 "$WATCHER_SCRIPT_TEMPLATE" /usr/local/sbin/grub-standalone-watch.sh
+  sudo install -D -m 0644 "$WATCHER_SERVICE_TEMPLATE" /etc/systemd/system/grub-standalone-watch.service
+
+  say "Writing config: /etc/secureboot/grub-standalone.conf"
+  sudo install -d -m 0755 /etc/secureboot
+  sudo tee /etc/secureboot/grub-standalone.conf >/dev/null <<EOF
+ESP_MOUNT="$esp"
+ESP_DEV="$esp_dev"
+GRUB_ID="$grub_id"
+
+MOK_KEY="$mok_key"
+MOK_CRT="$mok_crt"
+
+MODULES="$modules_final"
+
+THEME_DIR="$theme_dir"
+THEME_NAME="starfield"
+
+SPLASH_SRC="$splash_src"
+EOF
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now grub-standalone-watch.service
+  say "Watcher enabled: grub-standalone-watch.service"
+
+  say "Running initial rebuild now (so you're good immediately)"
+  sudo /usr/local/sbin/grub-standalone-rebuild.sh || true
+}
+
 final_instructions() {
   cat <<'TXT'
 
@@ -868,14 +965,14 @@ main() {
       ;;
     6)
       esp="$(get_esp_or_ask)"
-      reinstall_grub_with_modules_and_sign "$esp"
+      install_grub_standalone_maintenance "$esp"
       ;;
     7)
       esp="$(get_esp_or_ask)"
       setup_shim_and_mokmanager "$esp"
       sign_kernel_and_grub_with_mok "$esp"
       install_mkinitcpio_hook
-      reinstall_grub_with_modules_and_sign "$esp"
+      install_grub_standalone_maintenance "$esp"
       ;;
     *)
       die "Invalid selection."

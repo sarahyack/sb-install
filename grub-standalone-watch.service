@@ -1,0 +1,15 @@
+[Unit]
+Description=Watch GRUB config/theme changes and rebuild standalone GRUB
+After=local-fs.target
+Wants=local-fs.target
+ConditionPathExists=/etc/secureboot/grub-standalone.conf
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/bash -c 'command -v inotifywait >/dev/null || /usr/bin/pacman -S --needed --noconfirm inotify-tools'
+ExecStart=/usr/local/sbin/grub-standalone-watch.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

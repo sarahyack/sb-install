@@ -1,0 +1,24 @@
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = grub
+Target = shim-signed
+Target = mkinitcpio
+Target = linux
+Target = linux-lts
+Target = linux-zen
+
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = etc/default/grub
+Target = etc/grub.d/*
+Target = boot/grub/themes/*
+Target = usr/share/endeavouros/splash.png
+
+[Action]
+Description = Rebuilding signed standalone GRUB EFI (Secure Boot)
+When = PostTransaction
+Exec = /usr/local/sbin/grub-standalone-rebuild.sh
