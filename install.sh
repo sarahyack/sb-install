@@ -8,11 +8,11 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone.hook"
 SIGNING_HOOK_TEMPLATE="$SCRIPT_DIR/mkinitcpio-hook.sh"
-WATCHER_SCRIPT_TEMPLATE="$SCRIPT_DIR/grub-standalone-watch.sh"
-WATCHER_SERVICE_TEMPLATE="$SCRIPT_DIR/grub-standalone-watch.service"
-STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/build-grub-standalone.sh"
+GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone.hook"
+WATCHER_SCRIPT_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.sh"
+WATCHER_SERVICE_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.service"
+STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/grub-standalone/build-grub-standalone.sh"
 ENV_FILE="$SCRIPT_DIR/env.sh"
 
 say() { printf "\n==> %s\n" "$*"; }
