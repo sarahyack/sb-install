@@ -1,0 +1,12 @@
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = linux
+Target = linux-lts
+Target = linux-zen
+
+[Action]
+Description = Signing kernels for shim-lock (Secure Boot)
+When = PostTransaction
+Exec = /usr/local/sbin/kernel-sbsign-all.sh

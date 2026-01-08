@@ -9,6 +9,8 @@ fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SIGNING_HOOK_TEMPLATE="$SCRIPT_DIR/mkinitcpio-hook.sh"
+KERNEL_SIGN_SCRIPT_TEMPLATE="$SCRIPT_DIR/kernel/kernel-sbsign-all.sh"
+KERNEL_SIGN_HOOK_TEMPLATE="$SCRIPT_DIR/kernel/kernel-sbsign.hook"
 GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone.hook"
 WATCHER_SCRIPT_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.sh"
 WATCHER_SERVICE_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.service"
@@ -863,6 +865,15 @@ install_grub_standalone_maintenance() {
       | awk 'NF && !seen[$0]++' \
       | paste -sd' ' -
   )"
+
+  # Install kernel signing script + pacman hook (PostTransaction)
+  say "Installing kernel signing script to /usr/local/sbin/kernel-sbsign-all.sh"
+  [[ -f "$KERNEL_SIGN_SCRIPT_TEMPLATE" ]] || die "Missing template: $KERNEL_SIGN_SCRIPT_TEMPLATE"
+  sudo install -D -m 0755 "$KERNEL_SIGN_SCRIPT_TEMPLATE" /usr/local/sbin/kernel-sbsign-all.sh
+
+  say "Installing pacman hook for kernel signing to /etc/pacman.d/hooks/95-kernel-sbsign.hook"
+  [[ -f "$KERNEL_SIGN_HOOK_TEMPLATE" ]] || die "Missing template: $KERNEL_SIGN_HOOK_TEMPLATE"
+  sudo install -D -m 0644 "$KERNEL_SIGN_HOOK_TEMPLATE" /etc/pacman.d/hooks/95-kernel-sbsign.hook
 
   say "Installing builder to /usr/local/sbin/grub-standalone-rebuild.sh"
   sudo install -D -m 0755 "$STANDALONE_GRUB_BUILDER" /usr/local/sbin/grub-standalone-rebuild.sh
