@@ -59,13 +59,11 @@ WORK="$(mktemp -d "$WORK_BASE/.work.XXXXXX")"
 cleanup(){ rm -rf "$WORK" || true; }
 trap cleanup EXIT
 
-ts_now(){ date +%Y%m%d-%H%M%S; }
-
 backup_to_dir() {
   local src="$1" bdir="$2"
   [[ -e "$src" ]] || return 0
   mkdir -p "$bdir"
-  cp -f "$src" "$bdir/$(basename "$src").$(ts_now).bak"
+  cp -f "$src" "$bdir/$(basename "$src").bak"
 }
 
 backup_esp_binary() {
