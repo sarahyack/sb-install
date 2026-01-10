@@ -8,7 +8,6 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SIGNING_HOOK_TEMPLATE="$SCRIPT_DIR/mkinitcpio-hook.sh"
 KERNEL_SIGN_SCRIPT_TEMPLATE="$SCRIPT_DIR/kernel/kernel-sbsign-all.sh"
 KERNEL_SIGN_HOOK_TEMPLATE="$SCRIPT_DIR/kernel/kernel-sbsign.hook"
 GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone.hook"
@@ -418,7 +417,7 @@ This script can:
   A) Run sbctl workflow (create/enroll keys, verify, sign complained files)
   B) Set up shim + MokManager on the ESP and create an NVRAM entry
   C) Create a MOK (RSA 2048) and sign kernel + GRUB EFI binaries using sbsigntools
-  D) Install mkinitcpio post hook: /etc/initcpio/post/kernel-sbsign (from template)
+  D) Install Watcher hooks for future update support
   E) Reinstall GRUB with GRUB_MODULES + sbat.csv, then sign + copy to fallback path
 
 It will ask before each big step.
@@ -486,39 +485,6 @@ mk_mok_keys() {
 
   say "Created: $mok_dir/MOK.key, MOK.crt, MOK.cer"
   show_mok_fingerprint_report "$mok_dir" "$esp"
-}
-
-install_mkinitcpio_hook() {
-  [[ -f "$SIGNING_HOOK_TEMPLATE" ]] || die "Missing template: $SIGNING_HOOK_TEMPLATE"
-
-  say "Installing mkinitcpio post hook to /etc/initcpio/post/kernel-sbsign"
-  sudo mkdir -p /etc/initcpio/post
-  sudo cp -f "$SIGNING_HOOK_TEMPLATE" /etc/initcpio/post/kernel-sbsign
-  sudo chmod +x /etc/initcpio/post/kernel-sbsign
-
-  warn "The installed hook still contains placeholder paths (/path/to/MOK.key /path/to/MOK.crt)."
-  if confirm "Do you want me to replace those placeholders now?" 0; then
-    local default_key="/etc/secureboot/mok/MOK.key"
-    local default_crt="/etc/secureboot/mok/MOK.crt"
-    local KEY_PATH CRT_PATH
-
-    read -r -p "Enter full path to MOK.key (default: /etc/secureboot/mok/MOK.key): " KEY_PATH
-    KEY_PATH="${KEY_PATH:-$default_key}"
-    read -r -p "Enter full path to MOK.crt (default: /etc/secureboot/mok/MOK.crt): " CRT_PATH
-    CRT_PATH="${CRT_PATH:-$default_crt}"
-
-    sudo test -f "$KEY_PATH" || die "Key not found: $KEY_PATH"
-    sudo test -f "$CRT_PATH" || die "Cert not found: $CRT_PATH"
-
-    # Escape slashes for sed
-    local key_esc crt_esc
-    key_esc="$(printf '%s' "$KEY_PATH" | sed 's/[\/&]/\\&/g')"
-    crt_esc="$(printf '%s' "$CRT_PATH" | sed 's/[\/&]/\\&/g')"
-    sudo sed -i "s#/path/to/MOK\.key#${key_esc}#g; s#/path/to/MOK\.crt#${crt_esc}#g" /etc/initcpio/post/kernel-sbsign
-    say "Updated /etc/initcpio/post/kernel-sbsign with your key paths."
-  else
-    say "Okay. Remember to edit /etc/initcpio/post/kernel-sbsign later."
-  fi
 }
 
 run_sbctl_flow() {
@@ -1144,7 +1110,7 @@ main() {
   echo "  2) sbctl flow (keys/enroll/verify/sign)"
   echo "  3) Shim + MokManager copy + NVRAM entry"
   echo "  4) Create MOK + sign kernel/GRUB + copy MOK.cer to ESP"
-  echo "  5) Install mkinitcpio post hook (/etc/initcpio/post/kernel-sbsign)"
+  echo "  5) Install Post-Update Hooks for Future Update Re-signing & Rebuilding"
   echo "  6) Reinstall GRUB with GRUB_MODULES + sbat.csv + sign/copy fallback"
   echo "  7) Run a typical full sequence (3 -> 4 -> 5 -> 6), with prompts"
   echo "  8) Optional: grub-btrfs snapshot boot menu support (Snapper/Timeshift)"
@@ -1168,7 +1134,7 @@ main() {
       sign_kernel_and_grub_with_mok "$esp"
       ;;
     5)
-      install_mkinitcpio_hook
+      
       ;;
     6)
       esp="$(get_esp_or_ask)"
@@ -1178,7 +1144,6 @@ main() {
       esp="$(get_esp_or_ask)"
       setup_shim_and_mokmanager "$esp"
       sign_kernel_and_grub_with_mok "$esp"
-      install_mkinitcpio_hook
       install_grub_standalone_maintenance "$esp"
       ;;
     8)
