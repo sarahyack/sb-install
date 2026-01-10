@@ -20,7 +20,8 @@ ENV_FILE="$SCRIPT_DIR/env.sh"
 # shellcheck source=/dev/null
 [[ -f "$ENV_FILE" ]] || die "Missing env.sh"; source "$ENV_FILE"
 
-source "$SCRIPT_DIR/lib/helpers.sh" || die "Missing Script Helpers"
+source "$SCRIPT_DIR/lib/helpers.sh"
+source "$SCRIPT_DIR/checkhealth.sh"
 
 show_intro() {
   cat <<'TXT'
@@ -473,9 +474,10 @@ main() {
   echo "  6) Rebuild GRUB Standalone with GRUB_MODULES + sbat.csv + sign/copy fallback"
   echo "  7) Run a typical full sequence (3 -> 4 -> 5 -> 6), with prompts"
   echo "  8) Optional: grub-btrfs snapshot boot menu support (Snapper/Timeshift)"
+  echo "  9) Run a Health Check For This Script To Ensure Everything's Setup Properly"
   echo
 
-  read -r -p "Enter selection (1-8): " sel
+  read -r -p "Enter selection (1-9): " sel
   case "$sel" in
     1)
       confirm "Install sbctl, shim-signed, sbsigntools, inotify-tools, efibootmgr, grub, openssl?" 0 && \
@@ -510,6 +512,8 @@ main() {
     8)
       install_grub_btrfs_support
       ;;
+    9)
+      checkhealth
     *)
       die "Invalid selection."
       ;;
