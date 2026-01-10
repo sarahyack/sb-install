@@ -334,6 +334,8 @@ install_grub_standalone_maintenance() {
   )"
 
   local default_watch_dirs="/etc/default /etc/grub.d /boot/grub/themes /usr/share/endeavouros"
+  local existing_watch_dirs="$(read_existing_watch_dirs || true)"
+  local watch_dirs="${existing_watch_dirs:-$default_watch_dirs}"
 
   say "Writing config: /etc/secureboot/grub-standalone.conf"
   sudo install -d -m 0755 /etc/secureboot
@@ -351,7 +353,7 @@ THEME_DIR="$theme_dir"
 THEME_NAME="$theme_name"
 
 SPLASH_SRC="$splash_src"
-WATCH_DIRS="$default_watch_dirs"
+WATCH_DIRS="$watch_dirs"
 DEBOUNCE_SECS="2"
 INOTIFY_EVENTS="close_write,move,create,delete,attrib"
 EOF

@@ -43,6 +43,19 @@ cert_fpr_sha256() {
     | sed -E 's/^.*=//; s/://g'
 }
 
+read_existing_watch_dirs() {
+  local conf="/etc/secureboot/grub-standalone.conf"
+  sudo test -r "$conf" || return 1
+  sudo awk -F= '
+    $1=="WATCH_DIRS" {
+      v=$2
+      sub(/^"/,"",v); sub(/"$/,"",v)
+      print v
+      exit
+    }
+  ' "$conf"
+}
+
 # -------------------------
 # Admin Helpers
 # -------------------------
