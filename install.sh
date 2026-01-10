@@ -34,6 +34,8 @@ This script can:
   C) Create a MOK (RSA 2048) and sign kernel + GRUB EFI binaries using sbsigntools
   D) Install Watcher hooks for future update support
   E) Reinstall GRUB with GRUB_MODULES + sbat.csv, then sign + copy to fallback path
+  F) Set Up Full Support for Grub-Btrfs & Snapshots (Snapper or Timeshift)
+  G) Run a Health Check for Everything This Script Installs/Signs
 
 It will ask before each big step.
 
@@ -452,8 +454,6 @@ If running full sequence for the first time, the next manual steps that cannot b
 
 Tip: If you want GRUB_MODULES available in your current shell, run:
   source ./sb-install/env.sh
-
-Please Check the documentation for steps to ensure all the watchers are installed and functioning properly.
 
 TXT
 }
