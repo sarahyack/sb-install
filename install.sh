@@ -65,7 +65,7 @@ backup_file() {
   base="$(basename -- "$path")"
   if [[ -e "$path" ]]; then
     sudo mkdir -p "$backup_dir"
-    sudo cp -f "$path" "$backup_dir/${base}.$(date +%Y%m%d-%H%M%S).bak"
+    sudo cp -f "$path" "$backup_dir/${base}.bak"
   fi
 }
 
@@ -206,13 +206,12 @@ sign_in_place() {
   local dir base ts tmp bak
   dir="$(dirname -- "$target")"
   base="$(basename -- "$target")"
-  ts="$(date +%Y%m%d-%H%M%S)"
 
   # Temp file on SAME filesystem as target (ESP-safe)
   sudo mkdir -p "$dir/backups"
   tmp="$(sudo mktemp --tmpdir="$dir/backups" ".${base}.sbsign.${ts}.XXXXXX")" \
     || die "mktemp failed in $dir/backups"
-  bak="${dir}/backups/${base}.presign.${ts}.bak"
+  bak="${dir}/backups/${base}.presign.bak"
 
   say "Signing: $target"
   sudo sbsign --key "$key" --cert "$cert" --output "$tmp" "$target"
@@ -866,6 +865,8 @@ install_grub_standalone_maintenance() {
       | paste -sd' ' -
   )"
 
+  local default_watch_dirs="/etc/default /etc/grub.d /boot/grub/themes /usr/share/endeavouros"
+
   # Install kernel signing script + pacman hook (PostTransaction)
   say "Installing kernel signing script to /usr/local/sbin/kernel-sbsign-all.sh"
   [[ -f "$KERNEL_SIGN_SCRIPT_TEMPLATE" ]] || die "Missing template: $KERNEL_SIGN_SCRIPT_TEMPLATE"
@@ -903,6 +904,9 @@ THEME_DIR="$theme_dir"
 THEME_NAME="starfield"
 
 SPLASH_SRC="$splash_src"
+WATCH_DIRS="$default_watch_dirs"
+DEBOUNCE_SECS="2"
+INOTIFY_EVENTS="close_write,move,create,delete,attrib"
 EOF
 
   sudo systemctl daemon-reload
@@ -913,10 +917,199 @@ EOF
   sudo /usr/local/sbin/grub-standalone-rebuild.sh || true
 }
 
+# -----------------------------
+# Optional: grub-btrfs support
+# -----------------------------
+
+sed_escape() {
+  # escape for sed replacement (delimiter '|')
+  printf '%s' "$1" | sed -e 's/[\\/&|]/\\&/g'
+}
+
+conf_get_var_as_root() {
+  # Usage: conf_get_var_as_root /path/to/conf VAR
+  local conf="$1" var="$2"
+  sudo bash -c "set -a; source '$conf' 2>/dev/null || true; printf '%s' \"\${$var:-}\""
+}
+
+conf_set_line_kv() {
+  # Replace or append: KEY="VALUE"
+  # Usage: conf_set_line_kv /path/to/conf KEY VALUE
+  local conf="$1" key="$2" val="$3"
+  local esc
+  esc="$(sed_escape "$val")"
+
+  if sudo grep -qE "^${key}=" "$conf"; then
+    sudo sed -i -E "s|^${key}=.*$|${key}=\"${esc}\"|g" "$conf"
+  else
+    printf '%s\n' "${key}=\"${val}\"" | sudo tee -a "$conf" >/dev/null
+  fi
+}
+
+conf_add_watch_dir() {
+  # Adds a directory to WATCH_DIRS if not already present.
+  # Keeps existing WATCH_DIRS if user customized it.
+  local dir="$1"
+  local conf="/etc/secureboot/grub-standalone.conf"
+  [[ -n "$dir" ]] || return 0
+  sudo test -f "$conf" || die "Missing $conf. Run the standalone install step first."
+
+  local cur
+  cur="$(conf_get_var_as_root "$conf" WATCH_DIRS)"
+  if [[ -z "$cur" ]]; then
+    # Use your script defaults, plus the new dir.
+    cur="/etc/default /etc/grub.d /boot/grub/themes /usr/share/endeavouros"
+  fi
+
+  if [[ " $cur " == *" $dir "* ]]; then
+    say "WATCH_DIRS already contains: $dir"
+    return 0
+  fi
+
+  local new="${cur} ${dir}"
+  conf_set_line_kv "$conf" WATCH_DIRS "$new"
+  say "Added to WATCH_DIRS: $dir"
+}
+
+detect_timeshift_snapshot_dir() {
+  # Best-effort detection:
+  # - First try snapshot_location from /etc/timeshift/timeshift.json
+  # - Then common defaults for Timeshift BTRFS mode
+  local loc=""
+
+  if sudo test -r /etc/timeshift/timeshift.json; then
+    loc="$(sudo sed -nE 's/.*"snapshot_location"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' /etc/timeshift/timeshift.json | head -n1)"
+  fi
+
+  # If the config value exists and is a directory, use it
+  if [[ -n "$loc" ]] && sudo test -d "$loc"; then
+    printf '%s\n' "$loc"
+    return 0
+  fi
+
+  # Common stable path for Timeshift BTRFS snapshots
+  if sudo test -d /timeshift-btrfs/snapshots; then
+    printf '%s\n' "/timeshift-btrfs/snapshots"
+    return 0
+  fi
+
+  # Some systems show a stable mount created for Timeshift operations (less reliable)
+  if sudo test -d /run/timeshift/backup/timeshift-btrfs/snapshots; then
+    printf '%s\n' "/run/timeshift/backup/timeshift-btrfs/snapshots"
+    return 0
+  fi
+
+  # If nothing exists yet, return the “expected” default (so we can watch it once it appears).
+  # This keeps the setup simple, but you should tell users to configure Timeshift in BTRFS mode first.
+  printf '%s\n' "/timeshift-btrfs/snapshots"
+  return 0
+}
+
+ensure_snapper_root_config() {
+  command -v snapper >/dev/null 2>&1 || return 1
+
+  if sudo snapper list-configs 2>/dev/null | awk 'NR>2 {print $1}' | grep -qx root; then
+    say "Snapper config 'root' already exists."
+  else
+    say "Creating Snapper config 'root' for /"
+    sudo snapper -c root create-config /
+  fi
+
+  # Timers are optional, but are usually what people want.
+  sudo systemctl enable --now snapper-timeline.timer snapper-cleanup.timer >/dev/null 2>&1 || true
+}
+
+detect_snapper_snapshot_dir() {
+  # Snapper stores snapshots in a .snapshots directory for the configured SUBVOLUME.
+  # For the typical root config, that’s /.snapshots
+  local cfg="/etc/snapper/configs/root"
+  local sub="/"
+
+  if sudo test -r "$cfg"; then
+    sub="$(sudo awk -F= '/^SUBVOLUME=/{print $2; exit}' "$cfg")"
+    [[ -n "$sub" ]] || sub="/"
+  fi
+
+  sub="${sub%/}"
+  [[ -n "$sub" ]] || sub="/"
+  printf '%s\n' "${sub}/.snapshots"
+}
+
+disable_grub_btrfsd() {
+  # grub-btrfs usually ships a daemon/path unit to regenerate /boot/grub/grub.cfg.
+  # We do NOT want that, because we embed grub.cfg into the signed standalone EFI.
+  for u in grub-btrfsd.service grub-btrfsd.path grub-btrfs.path grub-btrfs.service; do
+    sudo systemctl disable --now "$u" >/dev/null 2>&1 || true
+  done
+}
+
+install_grub_btrfs_support() {
+  say "Optional snapshot boot menu support (grub-btrfs)"
+
+  confirm "Install grub-btrfs?" 0 || { say "Skipping grub-btrfs support."; return 0; }
+  yay_install grub-btrfs
+
+  # Ensure grub-btrfs script is executable if present
+  if sudo test -f /etc/grub.d/41_snapshots-btrfs; then
+    sudo chmod +x /etc/grub.d/41_snapshots-btrfs || true
+  fi
+
+  say "Choose snapshot tool:"
+  echo "  1) Snapper (recommended)"
+  echo "  2) Timeshift (BTRFS mode only)"
+  echo "  3) Neither (I’ll install grub-btrfs only)"
+  read -r -p "Enter selection (1-3): " tool_sel
+
+  local snapdir=""
+  case "$tool_sel" in
+    1)
+      confirm "Install snapper + btrfs-progs?" 0 && yay_install snapper btrfs-progs
+      ensure_snapper_root_config || warn "Snapper config step may have failed; you can create it later."
+      snapdir="$(detect_snapper_snapshot_dir)"
+      say "Detected Snapper snapshot dir: $snapdir"
+      conf_add_watch_dir "/etc/snapper"
+      ;;
+    2)
+      confirm "Install timeshift + btrfs-progs?" 0 && yay_install timeshift btrfs-progs
+      snapdir="$(detect_timeshift_snapshot_dir)"
+      say "Detected/assumed Timeshift snapshot dir: $snapdir"
+      warn "Reminder: Timeshift must be configured in BTRFS mode for grub-btrfs menus to work."
+      conf_add_watch_dir "/etc/timeshift"
+      ;;
+    3)
+      warn "No snapshot tool installed (grub-btrfs only)."
+      ;;
+    *)
+      warn "Invalid selection; skipping snapshot tool setup."
+      ;;
+  esac
+
+  disable_grub_btrfsd
+
+  # Add snapshot dir to your existing watcher (so snapshot creation triggers rebuild)
+  if [[ -n "$snapdir" ]]; then
+    conf_add_watch_dir "$snapdir"
+  fi
+
+  # Restart watcher so it rereads grub-standalone.conf
+  sudo systemctl restart grub-standalone-watch.service >/dev/null 2>&1 || true
+
+  # Rebuild once now so the snapshot submenu is embedded immediately (if snapshots exist)
+  if sudo test -x /usr/local/sbin/grub-standalone-rebuild.sh; then
+    say "Running standalone rebuild now (to bake snapshot menu in, if any exist)..."
+    sudo /usr/local/sbin/grub-standalone-rebuild.sh || true
+  else
+    warn "Standalone rebuild script missing: /usr/local/sbin/grub-standalone-rebuild.sh"
+  fi
+
+  say "grub-btrfs support done."
+  say "Tip: watch logs with: journalctl -fu grub-standalone-watch.service"
+}
+
 final_instructions() {
   cat <<'TXT'
 
-Next manual steps (cannot be scripted safely):
+If running full sequence for the first time, the next manual steps that cannot be scripted safely are:
 
 1) Reboot and enable Secure Boot in firmware if needed.
 
@@ -933,6 +1126,8 @@ Next manual steps (cannot be scripted safely):
 
 Tip: If you want GRUB_MODULES available in your current shell, run:
   source ./sb-install/env.sh
+
+Please Check the documentation for steps to ensure all the watchers are installed and functioning properly.
 
 TXT
 }
@@ -952,9 +1147,10 @@ main() {
   echo "  5) Install mkinitcpio post hook (/etc/initcpio/post/kernel-sbsign)"
   echo "  6) Reinstall GRUB with GRUB_MODULES + sbat.csv + sign/copy fallback"
   echo "  7) Run a typical full sequence (3 -> 4 -> 5 -> 6), with prompts"
+  echo "  8) Optional: grub-btrfs snapshot boot menu support (Snapper/Timeshift)"
   echo
 
-  read -r -p "Enter selection (1-7): " sel
+  read -r -p "Enter selection (1-8): " sel
   case "$sel" in
     1)
       confirm "Install sbctl, shim-signed, sbsigntools, efibootmgr, grub, openssl?" 0 && \
@@ -984,6 +1180,9 @@ main() {
       sign_kernel_and_grub_with_mok "$esp"
       install_mkinitcpio_hook
       install_grub_standalone_maintenance "$esp"
+      ;;
+    8)
+      install_grub_btrfs_support
       ;;
     *)
       die "Invalid selection."
