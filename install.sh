@@ -287,7 +287,7 @@ install_grub_standalone_maintenance() {
   local esp_dev
   esp_dev="$(esp_device_from_mount "$esp")" || die "Couldn't detect ESP device from mount: $esp"
   if [[ "$esp_dev" == UUID=* ]]; then
-    uuid="${esp_dev#UUID=}"
+    local uuid="${esp_dev#UUID=}"
     esp_dev="$(blkid -U "$uuid" 2>/dev/null || true)"
   fi
   esp_dev="$(readlink -f -- "$esp_dev" 2>/dev/null || printf '%s' "$esp_dev")"

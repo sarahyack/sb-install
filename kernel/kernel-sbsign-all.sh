@@ -28,7 +28,7 @@ sign_one() {
   [[ -f "$k" ]] || return 0
 
   # already good? skip.
-  if sbverify --cert "$MOK_CRT" --verify "$k" >/dev/null 2>&1; then
+  if sbverify --cert "$MOK_CRT" "$k" >/dev/null 2>&1; then
     log "OK (already signed): $k"
     return 0
   fi
