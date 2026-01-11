@@ -301,13 +301,17 @@ install_grub_standalone_maintenance() {
 
   local mok_key_def="/etc/secureboot/mok/MOK.key"
   local mok_crt_def="/etc/secureboot/mok/MOK.crt"
+  local mok_cer_def="/etc/secureboot/mok/MOK.cer"
   read -r -p "MOK.key path (default: $mok_key_def): " mok_key
   mok_key="${mok_key:-$mok_key_def}"
   read -r -p "MOK.crt path (default: $mok_crt_def): " mok_crt
   mok_crt="${mok_crt:-$mok_crt_def}"
+  read -r -p "MOK.cer path (default: $mok_cer_def): " mok_cer
+  mok_cer="${mok_cer:-$mok_cer_def}"
 
   sudo test -r "$mok_key" || die "Can't read: $mok_key"
   sudo test -r "$mok_crt" || die "Can't read: $mok_crt"
+  sudo test -r "$mok_cer" || die "Can't read: $mok_cer"
 
   local theme_dir_def="/boot/grub/themes/starfield"
   read -r -p "Theme dir to embed (default: $theme_dir_def): " theme_dir
@@ -349,6 +353,7 @@ GRUB_ID="$grub_id"
 
 MOK_KEY="$mok_key"
 MOK_CRT="$mok_crt"
+MOK_CER="$mok_cer"
 
 MODULES="$modules_final"
 

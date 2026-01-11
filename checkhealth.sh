@@ -88,12 +88,14 @@ checkhealth() {
     GRUB_ID="$(conf_get_var_as_root "$CONF" GRUB_ID)"
     MOK_KEY="$(conf_get_var_as_root "$CONF" MOK_KEY)"
     MOK_CRT="$(conf_get_var_as_root "$CONF" MOK_CRT)"
+    MOK_CER="$(conf_get_var_as_root "$CONF" MOK_CER)"
     WATCH_DIRS="$(conf_get_var_as_root "$CONF" WATCH_DIRS)"
 
     [[ -n "$ESP_MOUNT" ]] && h_ok "ESP_MOUNT=$ESP_MOUNT" || h_fail "ESP_MOUNT is empty in $CONF"
     [[ -n "$GRUB_ID" ]]   && h_ok "GRUB_ID=$GRUB_ID"     || h_fail "GRUB_ID is empty in $CONF"
     [[ -n "$MOK_KEY" ]]   && h_ok "MOK_KEY=$MOK_KEY"     || h_fail "MOK_KEY is empty in $CONF"
     [[ -n "$MOK_CRT" ]]   && h_ok "MOK_CRT=$MOK_CRT"     || h_fail "MOK_CRT is empty in $CONF"
+    [[ -n "$MOK_CER" ]]   && h_ok "MOK_CRT=$MOK_CER"     || h_fail "MOK_CER is empty in $CONF"
 
     if [[ -n "$WATCH_DIRS" ]]; then
       h_ok "WATCH_DIRS set"
@@ -135,16 +137,18 @@ checkhealth() {
   fi
 
   pid="$(systemctl show -p MainPID --value grub-standalone-watch.service 2>/dev/null || true)"
-  if [[ -n "$pid" && "$pid" != "0" ]]; then
-    h_ok "watcher MainPID=$pid"
-    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    if echo "$args" | grep -q "inotifywait"; then
-      h_ok "watcher appears to be running inotifywait"
-    else
-      h_warn "watcher PID exists but doesn't look like inotifywait (args: $args)"
-    fi
+  args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  # 1) If MainPID is our watcher script, that's fine (systemd often tracks the shell script, not the inotify child).
+  if echo "$args" | grep -qE '(^|[[:space:]])(bash[[:space:]]+)?(/usr/local/sbin/)?grub-standalone-watch\.sh([[:space:]]|$)'; then
+    h_ok "watcher MainPID is grub-standalone-watch.sh (normal)"
+  # 2) If MainPID itself is inotifywait, also fine.
+  elif echo "$args" | grep -q "inotifywait"; then
+    h_ok "watcher MainPID appears to be running inotifywait"
+  # 3) Otherwise, check whether the service cgroup contains inotifywait.
+  elif systemctl status grub-standalone-watch.service --no-pager 2>/dev/null | grep -q "inotifywait"; then
+    h_ok "watcher cgroup contains inotifywait"
   else
-    h_fail "watcher has no running MainPID"
+    h_warn "watcher is active, but couldn't confirm inotifywait (MainPID args: $args)"
   fi
 
   if [[ "$act" != "active" || -z "$pid" || "$pid" == "0" ]]; then
@@ -161,6 +165,13 @@ checkhealth() {
     fi
   fi
 
+  if [[ -n "$MOK_CER" ]]; then
+    if sudo test -r "$MOK_CER"; then
+      h_ok "MOK DER cert readable: $MOK_CER"
+    else
+      h_fail "Can't read MOK DER cert (for mokutil): $MOK_CER"
+    fi
+  fi
   # 7a) Kernel(s)
   if [[ -n "$MOK_CRT" ]] && sudo test -r "$MOK_CRT"; then
     local any_kernel=0
@@ -203,33 +214,25 @@ checkhealth() {
   fi
 
   # --- 8) MOK enrollment (best-effort, optional) ---
-  # This is what actually prevents “bad shim lock signature” surprises.
-  if have_cmd mokutil && [[ -n "$MOK_CRT" ]]; then
+  # Use MOK_CER (DER) and run mokutil with sudo (reading EFI vars often needs root).
+  if have_cmd mokutil && [[ -n "$MOK_CER" ]]; then
     h_info "Secure Boot state (mokutil):"
-    mokutil --sb-state 2>/dev/null | sed 's/^/    /' || true
+    sudo mokutil --sb-state 2>/dev/null | sed 's/^/    /' || true
 
-    # Prefer DER if it exists next to the CRT
-    local mok_cer=""
-    mok_cer="$(printf '%s' "$MOK_CRT" | sed -E 's/\.[^.]+$/.cer/')"
-    if sudo test -r "$mok_cer"; then
-      :
-    else
-      mok_cer="" # fall back to CRT
-    fi
-
-    local test_path="${mok_cer:-$MOK_CRT}"
-    if sudo test -r "$test_path"; then
-      if mokutil --test-key "$test_path" >/dev/null 2>&1; then
-        h_ok "MOK appears enrolled (mokutil --test-key): $test_path"
+    if sudo test -r "$MOK_CER"; then
+      local out=""
+      if out="$(sudo mokutil --test-key "$MOK_CER" 2>&1)"; then
+        h_ok "MOK appears enrolled (mokutil --test-key): $MOK_CER"
       else
-        h_fail "MOK NOT enrolled (mokutil --test-key failed): $test_path"
+        h_fail "MOK test failed (mokutil --test-key): $MOK_CER"
+        h_info "mokutil output: $out"
         h_info "Fix: copy MOK.cer to ESP, reboot into MokManager, enroll it."
       fi
     else
-      h_warn "Can't read cert for mokutil test-key: $test_path"
+      h_fail "Can't read MOK_CER for mokutil test: $MOK_CER"
     fi
   else
-    h_warn "mokutil not available; skipping enrollment test (install package 'mokutil' if you want this check)"
+    h_warn "mokutil not available or MOK_CER missing; skipping enrollment test (install mokutil and set MOK_CER)"
   fi
 
   # --- 9) Summary + exit code ---
