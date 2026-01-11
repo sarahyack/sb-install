@@ -401,6 +401,8 @@ install_grub_btrfs_support() {
       snapdir="$(detect_snapper_snapshot_dir)"
       say "Detected Snapper snapshot dir: $snapdir"
       conf_add_watch_dir "/etc/snapper"
+      confirm "Install snapper GUI? (btrfs-assistant)" 0 && yay_install btrfs-assistant
+      confirm "Install Auto-Snapshot Support For Updates? (snap-pac) [y/n]" 0 && yay_install snap-pac
       ;;
     2)
       confirm "Install timeshift + btrfs-progs?" 0 && yay_install timeshift btrfs-progs
@@ -408,6 +410,7 @@ install_grub_btrfs_support() {
       say "Detected/assumed Timeshift snapshot dir: $snapdir"
       warn "Reminder: Timeshift must be configured in BTRFS mode for grub-btrfs menus to work."
       conf_add_watch_dir "/etc/timeshift"
+      confirm "Install Auto-Snapshot Support For Updates? (timeshift-autosnap) [y/n]" 0 && yay_install timeshift-autosnap
       ;;
     3)
       warn "No snapshot tool installed (grub-btrfs only)."
