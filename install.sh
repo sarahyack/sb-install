@@ -514,6 +514,7 @@ main() {
       ;;
     9)
       checkhealth
+      ;;
     *)
       die "Invalid selection."
       ;;
