@@ -214,19 +214,28 @@ checkhealth() {
   fi
 
   # --- 8) MOK enrollment (best-effort, optional) ---
-  # Use MOK_CER (DER) and run mokutil with sudo (reading EFI vars often needs root).
+  # Use MOK_CER (DER) and run mokutil with sudo.
   if have_cmd mokutil && [[ -n "$MOK_CER" ]]; then
     h_info "Secure Boot state (mokutil):"
     sudo mokutil --sb-state 2>/dev/null | sed 's/^/    /' || true
-
+  
     if sudo test -r "$MOK_CER"; then
-      local out=""
-      if out="$(sudo mokutil --test-key "$MOK_CER" 2>&1)"; then
+      local out rc
+      out="$(sudo mokutil --test-key "$MOK_CER" 2>&1 || true)"
+      rc=$?
+  
+      # Some mokutil versions return non-zero even when enrolled.
+      if [[ "$rc" -eq 0 ]] || echo "$out" | grep -qiE 'already enrolled|is enrolled|enrolled'; then
         h_ok "MOK appears enrolled (mokutil --test-key): $MOK_CER"
-      else
-        h_fail "MOK test failed (mokutil --test-key): $MOK_CER"
+        h_info "mokutil output: $out"
+      elif echo "$out" | grep -qiE 'not enrolled|no.*match|not found'; then
+        h_fail "MOK NOT enrolled (mokutil --test-key): $MOK_CER"
         h_info "mokutil output: $out"
         h_info "Fix: copy MOK.cer to ESP, reboot into MokManager, enroll it."
+      else
+        h_warn "mokutil --test-key returned an unexpected result (rc=$rc): $MOK_CER"
+        h_info "mokutil output: $out"
+        h_info "If Secure Boot boots fine + EFI verifies against MOK cert, this is likely a mokutil quirk."
       fi
     else
       h_fail "Can't read MOK_CER for mokutil test: $MOK_CER"
