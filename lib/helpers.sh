@@ -581,19 +581,38 @@ ensure_snapper_root_config() {
 }
 
 detect_snapper_snapshot_dir() {
-  # Snapper stores snapshots in a .snapshots directory for the configured SUBVOLUME.
-  # For the typical root config, that’s /.snapshots
+  # Snapper snapshots live at: <SUBVOLUME>/.snapshots
   local cfg="/etc/snapper/configs/root"
   local sub="/"
 
   if sudo test -r "$cfg"; then
     sub="$(sudo awk -F= '/^SUBVOLUME=/{print $2; exit}' "$cfg")"
-    [[ -n "$sub" ]] || sub="/"
   fi
 
-  sub="${sub%/}"
+  # Trim whitespace, strip quotes
+  sub="$(printf '%s' "$sub" | tr -d '"' | xargs)"
   [[ -n "$sub" ]] || sub="/"
-  printf '%s\n' "${sub}/.snapshots"
+
+  # Ensure it starts with exactly one leading slash
+  if [[ "$sub" != /* ]]; then
+    sub="/$sub"
+  fi
+
+  # Remove trailing slash unless it is the root
+  if [[ "$sub" != "/" ]]; then
+    sub="${sub%/}"
+  fi
+
+  local path
+  if [[ "$sub" == "/" ]]; then
+    path="/.snapshots"
+  else
+    path="${sub}/.snapshots"
+  fi
+
+  # Collapse any accidental double slashes
+  path="$(printf '%s' "$path" | sed -E 's#/{2,}#/#g')"
+  printf '%s\n' "$path"
 }
 
 disable_grub_btrfsd() {
