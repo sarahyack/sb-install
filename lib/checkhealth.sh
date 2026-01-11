@@ -2,7 +2,7 @@
 # Checkhealth Function For Sb-Install
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/lib/helpers.sh"
+source "$SCRIPT_DIR/helpers.sh"
 
 checkhealth() {
   say "Health Check: Secure Boot + Standalone GRUB + Watchers"

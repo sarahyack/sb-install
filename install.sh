@@ -14,14 +14,14 @@ GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone.hook"
 WATCHER_SCRIPT_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.sh"
 WATCHER_SERVICE_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.service"
 STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/grub-standalone/build-grub-standalone.sh"
-ENV_FILE="$SCRIPT_DIR/env.sh"
+ENV_FILE="$SCRIPT_DIR/lib/env.sh"
 
 # Load GRUB_MODULES into this script's environment (temporary)
 # shellcheck source=/dev/null
 [[ -f "$ENV_FILE" ]] || die "Missing env.sh"; source "$ENV_FILE"
 
 source "$SCRIPT_DIR/lib/helpers.sh"
-source "$SCRIPT_DIR/checkhealth.sh"
+source "$SCRIPT_DIR/lib/checkhealth.sh"
 
 show_intro() {
   cat <<'TXT'
