@@ -439,6 +439,12 @@ install_grub_btrfs_support() {
   say "Tip: watch logs with: journalctl -fu grub-standalone-watch.service"
 }
 
+run_healthcheck() {
+    confirm "Perform Health Check Now? [y/n]" 0
+
+    checkhealth
+}
+
 final_instructions() {
   cat <<'TXT'
 
@@ -457,9 +463,6 @@ If running full sequence for the first time, the next manual steps that cannot b
 
 3) Reboot again; Secure Boot should be working.
 
-Tip: If you want GRUB_MODULES available in your current shell, run:
-  source ./sb-install/env.sh
-
 TXT
 }
 
@@ -468,6 +471,8 @@ main() {
 
   need_cmd bash
   sudo_once
+
+  local check_already_run=false
 
   # Options
   say "Choose what to run:"
@@ -518,12 +523,17 @@ main() {
       install_grub_btrfs_support
       ;;
     9)
-      checkhealth
+      run_healthcheck
+      check_already_run=true
       ;;
     *)
       die "Invalid selection."
       ;;
   esac
+
+  if [[ "${check_already_run}" != true ]]; then
+      run_healthcheck
+  fi
 
   final_instructions
 }
