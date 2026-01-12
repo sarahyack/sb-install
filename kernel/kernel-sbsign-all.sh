@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -22,6 +21,51 @@ command -v sbverify >/dev/null 2>&1 || { warn "Missing sbverify (sbsigntools); s
 
 BACKUP_DIR="/var/lib/secureboot/kernel-sbsign/backups"
 mkdir -p "$BACKUP_DIR"
+BACKUP_KEEP="${SB_BACKUP_KEEP:-5}"
+
+backup_kernel() {
+  local k="$1"
+  local base ts run_id backup meta
+  base="$(basename "$k")"
+  ts="$(date -u +%Y%m%d-%H%M%S)"
+  run_id="${SB_INSTALL_RUN_ID:-${ts}-$$}"
+  backup="$BACKUP_DIR/${base}.sb-install.${ts}.bak"
+  meta="${backup}.meta"
+
+  cp -f "$k" "$backup"
+  cat > "$meta" <<EOF
+created_by=sb-install
+source_path=$k
+backup_time=$ts
+run_id=$run_id
+EOF
+  prune_backups "$base" "$BACKUP_KEEP"
+}
+
+prune_backups() {
+  local base="$1"
+  local keep="${2:-5}"
+  local -a files=()
+  local f
+
+  [[ "$keep" =~ ^[0-9]+$ ]] || return 0
+
+  shopt -s nullglob
+  for f in "$BACKUP_DIR/${base}.sb-install."*.bak; do
+    files+=("$f")
+  done
+  shopt -u nullglob
+
+  (( ${#files[@]} <= keep )) && return 0
+
+  local -a sorted=()
+  mapfile -t sorted < <(printf '%s\n' "${files[@]}" | sort)
+  local remove_count=$(( ${#sorted[@]} - keep ))
+  local i
+  for ((i=0; i<remove_count; i++)); do
+    rm -f "${sorted[$i]}" "${sorted[$i]}.meta"
+  done
+}
 
 sign_one() {
   local k="$1"
@@ -34,7 +78,7 @@ sign_one() {
   fi
 
   log "Signing: $k"
-  cp -f "$k" "$BACKUP_DIR/$(basename "$k").$(date +%Y%m%d-%H%M%S).bak"
+  backup_kernel "$k"
 
   local tmp="${k}.signed.$$"
   sbsign --key "$MOK_KEY" --cert "$MOK_CRT" --output "$tmp" "$k"

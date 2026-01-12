@@ -62,8 +62,55 @@ trap cleanup EXIT
 backup_to_dir() {
   local src="$1" bdir="$2"
   [[ -e "$src" ]] || return 0
+  local base ts run_id backup latest meta
+  base="$(basename "$src")"
+  ts="$(date -u +%Y%m%d-%H%M%S)"
+  run_id="${SB_INSTALL_RUN_ID:-${ts}-$$}"
+  backup="$bdir/${base}.sb-install.${ts}.bak"
+  latest="$bdir/${base}.bak"
+  meta="${backup}.meta"
   mkdir -p "$bdir"
-  cp -f "$src" "$bdir/$(basename "$src").bak"
+  cp -f "$src" "$backup"
+  cp -f "$src" "$latest"
+  cat > "$meta" <<EOF
+created_by=sb-install
+source_path=$src
+backup_time=$ts
+run_id=$run_id
+EOF
+  cat > "${latest}.meta" <<EOF
+created_by=sb-install
+source_path=$src
+backup_time=$ts
+run_id=$run_id
+EOF
+  prune_backups "$bdir" "$base" "${SB_BACKUP_KEEP:-5}"
+}
+
+prune_backups() {
+  local backup_dir="$1"
+  local base="$2"
+  local keep="${3:-5}"
+  local -a files=()
+  local f
+
+  [[ "$keep" =~ ^[0-9]+$ ]] || return 0
+
+  shopt -s nullglob
+  for f in "$backup_dir/${base}.sb-install."*.bak; do
+    files+=("$f")
+  done
+  shopt -u nullglob
+
+  (( ${#files[@]} <= keep )) && return 0
+
+  local -a sorted=()
+  mapfile -t sorted < <(printf '%s\n' "${files[@]}" | sort)
+  local remove_count=$(( ${#sorted[@]} - keep ))
+  local i
+  for ((i=0; i<remove_count; i++)); do
+    rm -f "${sorted[$i]}" "${sorted[$i]}.meta"
+  done
 }
 
 backup_esp_binary() {

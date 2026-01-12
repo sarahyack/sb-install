@@ -90,9 +90,56 @@ backup_file() {
   local base
   base="$(basename -- "$path")"
   if [[ -e "$path" ]]; then
+    local ts run_id backup latest meta
+    ts="$(date -u +%Y%m%d-%H%M%S)"
+    run_id="${SB_INSTALL_RUN_ID:-${ts}-$$}"
+    backup="$backup_dir/${base}.sb-install.${ts}.bak"
+    latest="$backup_dir/${base}.bak"
+    meta="${backup}.meta"
+
     sudo mkdir -p "$backup_dir"
-    sudo cp -f "$path" "$backup_dir/${base}.bak"
+    sudo cp -f "$path" "$backup"
+    sudo cp -f "$path" "$latest"
+    sudo tee "$meta" >/dev/null <<EOF
+created_by=sb-install
+source_path=$path
+backup_time=$ts
+run_id=$run_id
+EOF
+    sudo tee "${latest}.meta" >/dev/null <<EOF
+created_by=sb-install
+source_path=$path
+backup_time=$ts
+run_id=$run_id
+EOF
+    prune_backups "$backup_dir" "$base" "${SB_BACKUP_KEEP:-5}"
   fi
+}
+
+prune_backups() {
+  local backup_dir="$1"
+  local base="$2"
+  local keep="${3:-5}"
+  local -a files=()
+  local f
+
+  [[ "$keep" =~ ^[0-9]+$ ]] || return 0
+
+  shopt -s nullglob
+  for f in "$backup_dir/${base}.sb-install."*.bak; do
+    files+=("$f")
+  done
+  shopt -u nullglob
+
+  (( ${#files[@]} <= keep )) && return 0
+
+  local -a sorted=()
+  mapfile -t sorted < <(printf '%s\n' "${files[@]}" | sort)
+  local remove_count=$(( ${#sorted[@]} - keep ))
+  local i
+  for ((i=0; i<remove_count; i++)); do
+    sudo rm -f "${sorted[$i]}" "${sorted[$i]}.meta"
+  done
 }
 
 sign_in_place() {
@@ -696,6 +743,4 @@ disable_grub_btrfsd() {
     sudo systemctl disable --now "$u" >/dev/null 2>&1 || true
   done
 }
-
-
 

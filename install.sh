@@ -15,6 +15,8 @@ WATCHER_SCRIPT_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.sh"
 WATCHER_SERVICE_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.service"
 STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/grub-standalone/build-grub-standalone.sh"
 ENV_FILE="$SCRIPT_DIR/lib/env.sh"
+SB_INSTALL_RUN_ID="${SB_INSTALL_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
+export SB_INSTALL_RUN_ID
 
 # Load GRUB_MODULES into this script's environment (temporary)
 # shellcheck source=/dev/null
