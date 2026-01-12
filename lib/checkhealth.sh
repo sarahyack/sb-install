@@ -244,6 +244,105 @@ checkhealth() {
     h_warn "mokutil not available or MOK_CER missing; skipping enrollment test (install mokutil and set MOK_CER)"
   fi
 
+  # --- Optional: Snapshot support checks (grub-btrfs + snapper/timeshift) ---
+  h_section "Snapshot Support (optional)"
+
+  local SNAP_OK=""
+  read -r -p "Check snapshot support (grub-btrfs + Snapper/Timeshift)? [y/N]: " SNAP_OK || true
+  if [[ "${SNAP_OK:-}" =~ ^[Yy]$ ]]; then
+
+    # 1) grub-btrfs presence
+    if have_pkg grub-btrfs; then
+      h_ok "pkg: grub-btrfs"
+    else
+      h_warn "pkg missing: grub-btrfs (snapshot menu won't exist without it)"
+    fi
+
+    # 2) grub-btrfs grub.d script
+    local snap_grubd="/etc/grub.d/41_snapshots-btrfs"
+    if sudo test -e "$snap_grubd"; then
+      h_ok "exists: $snap_grubd"
+      if sudo test -x "$snap_grubd"; then
+        h_ok "executable: $snap_grubd"
+      else
+        h_warn "not executable: $snap_grubd (try: sudo chmod +x $snap_grubd)"
+      fi
+    else
+      h_warn "missing: $snap_grubd (grub-btrfs may not be installed or script name differs)"
+    fi
+
+    # 3) Ensure our pipeline CAN incorporate /etc/grub.d
+    # (This is mostly a sanity hint, not a hard rule.)
+    if have_cmd grub-mkconfig; then
+      h_ok "cmd: grub-mkconfig (snapshot menu generation requires grub-mkconfig)"
+    else
+      h_fail "Missing grub-mkconfig (required if you expect snapshot menu generation)"
+    fi
+
+    # 4) Snapshot tool presence (snapper vs timeshift)
+    local have_snapper=0 have_timeshift=0
+    have_pkg snapper && have_snapper=1
+    have_pkg timeshift && have_timeshift=1
+
+    if (( have_snapper == 1 )); then h_ok "pkg: snapper"; fi
+    if (( have_timeshift == 1 )); then h_ok "pkg: timeshift"; fi
+    if (( have_snapper == 0 && have_timeshift == 0 )); then
+      h_warn "No snapshot tool detected (snapper/timeshift). grub-btrfs may show nothing."
+    fi
+
+    # 5) Detect snapshot directory (best-effort) and confirm WATCH_DIRS includes it
+    local snapdir=""
+
+    if (( have_snapper == 1 )); then
+      snapdir="$(detect_snapper_snapshot_dir 2>/dev/null || true)"
+      if [[ -n "$snapdir" ]]; then
+        if sudo test -d "$snapdir"; then
+          h_ok "Snapper snapshot dir exists: $snapdir"
+        else
+          h_warn "Snapper snapshot dir not present yet: $snapdir (normal if no snapshots/config yet)"
+        fi
+      else
+        h_warn "Could not detect Snapper snapshot dir"
+      fi
+    fi
+
+    if [[ -z "$snapdir" && $have_timeshift -eq 1 ]]; then
+      snapdir="$(detect_timeshift_snapshot_dir 2>/dev/null || true)"
+      if [[ -n "$snapdir" ]]; then
+        if sudo test -d "$snapdir"; then
+          h_ok "Timeshift snapshot dir exists: $snapdir"
+        else
+          h_warn "Timeshift snapshot dir not present yet: $snapdir (normal if not configured / no snapshots)"
+        fi
+      else
+        h_warn "Could not detect Timeshift snapshot dir"
+      fi
+    fi
+
+    if [[ -n "${WATCH_DIRS:-}" && -n "${snapdir:-}" ]]; then
+      # Normalize just for comparison safety
+      local wd_norm
+      wd_norm="$(printf '%s' "$WATCH_DIRS" | tr '\n\t' ' ' | xargs)"
+      if str_in_list "$wd_norm" "$snapdir"; then
+        h_ok "WATCH_DIRS includes snapshot dir: $snapdir"
+      else
+        h_warn "WATCH_DIRS does NOT include snapshot dir: $snapdir (new snapshots won't trigger rebuild)"
+        h_info "Fix: run snapshot install option again or add it via conf_add_watch_dir"
+      fi
+    fi
+
+    # 6) Bonus: If any snapshots exist, hint that rebuild should generate menu
+    # (Soft check: we don't parse your embedded grub.cfg here.)
+    if sudo test -x /usr/local/sbin/grub-standalone-rebuild.sh; then
+      h_info "Tip: after creating a snapshot, run:"
+      h_info "  sudo /usr/local/sbin/grub-standalone-rebuild.sh"
+      h_info "Then reboot and check for the snapshot submenu."
+    fi
+
+  else
+    h_info "Snapshot checks skipped."
+  fi
+
   # --- 9) Summary + exit code ---
   echo
   if [[ "$FAIL" -eq 0 ]]; then

@@ -56,6 +56,10 @@ read_existing_watch_dirs() {
   ' "$conf"
 }
 
+h_section() { echo; echo "== $* =="; }
+have_pkg() { pacman -Qq "$1" >/dev/null 2>&1; }
+str_in_list() { [[ " $1 " == *" $2 "* ]]; } # list string, token
+
 # -------------------------
 # Admin Helpers
 # -------------------------
