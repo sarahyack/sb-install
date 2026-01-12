@@ -529,6 +529,8 @@ conf_add_watch_dir() {
 
   local cur
   cur="$(conf_get_var_as_root "$conf" WATCH_DIRS)"
+  cur="$(normalize_watch_dirs "$cur")"
+  conf_set_line_kv "$conf" WATCH_DIRS "$cur"
   if [[ -z "$cur" ]]; then
     # Use your script defaults, plus the new dir.
     cur="/etc/default /etc/grub.d /boot/grub/themes /usr/share/endeavouros"
@@ -542,6 +544,62 @@ conf_add_watch_dir() {
   local new="${cur} ${dir}"
   conf_set_line_kv "$conf" WATCH_DIRS "$new"
   say "Added to WATCH_DIRS: $dir"
+}
+
+conf_remove_watch_dir() {
+  local dir="$1"
+  local conf="/etc/secureboot/grub-standalone.conf"
+  [[ -n "$dir" ]] || return 0
+  sudo test -f "$conf" || die "Missing $conf"
+
+  # normalize the requested dir too
+  while [[ "$dir" == *"//"* ]]; do dir="${dir//\/\//\/}"; done
+  [[ "$dir" != "/" ]] && dir="${dir%/}"
+
+  local cur norm new
+  cur="$(conf_get_var_as_root "$conf" WATCH_DIRS)"
+  norm="$(normalize_watch_dirs "$cur")"
+
+  # rebuild without the target
+  new="$(
+    for d in $norm; do
+      [[ "$d" == "$dir" ]] && continue
+      printf '%s ' "$d"
+    done | sed -E 's/[[:space:]]+$//'
+  )"
+
+  conf_set_line_kv "$conf" WATCH_DIRS "$new"
+  say "Removed from WATCH_DIRS (if present): $dir"
+}
+
+normalize_watch_dirs() {
+  # input: a single string of space-separated dirs
+  local s="${1:-}"
+  local -a arr out
+  declare -A seen
+
+  # split on whitespace
+  read -r -a arr <<< "$s"
+
+  for d in "${arr[@]}"; do
+    [[ -n "$d" ]] || continue
+
+    # collapse multiple slashes
+    while [[ "$d" == *"//"* ]]; do d="${d//\/\//\/}"; done
+
+    # strip trailing slash (except root)
+    [[ "$d" != "/" ]] && d="${d%/}"
+
+    [[ -n "$d" ]] || continue
+
+    # de-dup
+    if [[ -z "${seen[$d]+x}" ]]; then
+      out+=("$d")
+      seen["$d"]=1
+    fi
+  done
+
+  printf '%s\n' "${out[*]}"
 }
 
 detect_timeshift_snapshot_dir() {
