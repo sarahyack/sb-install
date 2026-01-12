@@ -1,61 +1,394 @@
 # sb-install (Secure Boot Installation Script)
 
-## Purpose
-
-The general intention of this script is to provide an ease-of-use script to accomplish key generation, signing, shim-lock, and shim-lock support for GRUB on Arch-based distros, specifically EndeavourOS, although other distributions should also technically work.
-
 > [!warning]
 > This script has not been tested extensively, so unexpected outcomes could theoretically occur.
 
-## Usage
+## Table of Contents
 
-Ensure Secure Boot is disabled on your machine before you begin.
+- [What This Is](#what-this-is)
+- [Why It Exists](#why-it-exists)
+- [How It Works](#how-it-works)
+- [Quick Start](#quick-start)
+- [Prerequisites and Safety Checklist](#prerequisites-and-safety-checklist)
+- [Install Menu Options](#install-menu-options)
+- [Prompt Guide](#prompt-guide)
+- [What Gets Installed (File Map)](#what-gets-installed-file-map)
+- [Backups and Retention](#backups-and-retention)
+- [Automatic Updates](#automatic-updates)
+- [Health Check and Verification](#health-check-and-verification)
+- [Troubleshooting](#troubleshooting)
+- [Recovery / Rollback](#recovery--rollback)
+- [Uninstall](#uninstall)
+- [Security Notes](#security-notes)
+- [FAQ](#faq)
+- [Repository Layout](#repository-layout)
+- [Command Cheatsheet](#command-cheatsheet)
 
-1. Clone this repository
+---
 
-    ```shell
-    git clone https://github.com/sarahyack/sb-install
-    ```
+## What This Is
 
-2. Enter the Cloned repository
+A guided Secure Boot helper for Arch-based distros (built for EndeavourOS, should work on other Arch-based systems). Think of it as a careful, menu-driven assistant that walks you through the parts people usually have to stitch together by hand.
 
-    ```shell
-    cd sb-install
-    ```
+It helps you:
 
-3. Make the install script executable from the directory you cloned the repo into **(See Note)**:
+- set up a shim + MOK trust chain
+- sign kernels and GRUB EFI binaries
+- build a signed standalone GRUB EFI with embedded config/theme/splash
+- keep everything re-signed automatically after updates or edits
 
-    ```shell
-    chmod +x install.sh
-    ```
+It includes an install script (`install.sh`) and a dedicated uninstall script (`uninstall.sh`).
 
-4. Run the Installation Script
+## Why It Exists
 
-    ```shell
-    ./install.sh
-    ```
+Secure Boot requires EFI binaries to be signed by trusted keys. On Arch-based systems, GRUB themes, fonts, and kernel updates can silently break boot if you are using Secure Boot without a stable signing workflow.
 
+This project builds a reliable trust chain:
 
-> [!note] 
-> It's generally recommended when making an external script executable to look it over first and ensure you understand what it's changing in your machine.
+**Firmware → shim (Microsoft-signed) → GRUB (signed by your MOK) → kernel (signed by your MOK)**
 
-### After Installation
+…and makes sure it stays healthy over time using pacman hooks and a file watcher.
 
-The Final Steps to take after running the installation script are:
+If you have ever wondered why a theme vanished, or why a kernel update suddenly refuses to boot under Secure Boot, this is the automation layer that keeps those problems from resurfacing.
 
-1) Reboot and enable Secure Boot in firmware if needed. 
-2) If shim does not find the certificate that grubx64.efi is signed with in MokList, it will launch MokManager (mmx64.efi). 
-    - In MokManager: 
-        - Enroll key from disk
-            1. find MOK.cer on the ESP (often at \MOK.cer or \EFI\BOOT\MOK.cer) 
-            2. enroll it to MokList 
-            3. Continue boot 
-3) Reboot again; Secure Boot should be working.
+## How It Works
 
-## What it Does
+At a high level, the workflow is:
 
-The general breakdown is that it installs `sbctl` to handle the grunt work of getting the Machine Owner Keys (MOK) installed and enrolled on your machine, and then proceeds to enable and set up shim-lock for your machine and then enable GRUB shim-lock support.
+1. Set up shim + MokManager on the ESP and create a boot entry.
+2. Create or reuse a Machine Owner Key (MOK).
+3. Sign kernels and GRUB using that MOK.
+4. Build a **standalone GRUB EFI** (embeds grub.cfg + theme + splash).
+5. Install update automation (hooks + watcher service).
 
+Why standalone GRUB? It embeds config + assets so GRUB does not depend on disk files at boot time, which is more reliable under Secure Boot.
 
+The scripts are deliberately conservative: they back up before overwriting, confirm major steps, and exit safely if prerequisites are missing.
 
+---
 
+## Quick Start
+
+Ensure Secure Boot is disabled before you begin.
+
+```bash
+git clone https://github.com/sarahyack/sb-install
+cd sb-install
+chmod +x install.sh
+./install.sh
+```
+
+Recommended first run path:
+
+- Option 7 (full sequence) is the safest guided path.
+- Use BootNext when testing shim the first time.
+- If anything in a prompt feels unclear, pause and check the [Prompt Guide](#prompt-guide).
+
+After install:
+
+1. Reboot and enable Secure Boot in firmware (if it was off).
+2. If MokManager opens, enroll `MOK.cer` from the ESP (`\MOK.cer` or `\EFI\BOOT\MOK.cer`).
+3. Reboot again and confirm Secure Boot is working.
+
+> [!note]
+> Always read prompts carefully. This script modifies boot-critical files.
+> If you want a slower, step-by-step flow, run options 3 → 4 → 6 manually.
+
+---
+
+## Prerequisites and Safety Checklist
+
+- UEFI system with a mounted ESP (VFAT).
+- Secure Boot disabled for initial setup (recommended).
+- A recovery plan: ability to disable Secure Boot and boot a live USB if needed.
+- Sudo access and ability to reboot.
+- A bit of uninterrupted time (first run includes at least one reboot).
+
+Helpful commands:
+
+```bash
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
+findmnt -t vfat
+```
+
+---
+
+## Install Menu Options
+
+<details>
+<summary>Show all install menu options</summary>
+
+Each option is safe to run individually if you understand the scope. You can rerun options later without redoing the entire flow.
+
+1. **Install packages only**
+   - Installs required tools (sbctl/shim/sbsigntools/inotify-tools/grub/efibootmgr/openssl).
+
+2. **sbctl flow**
+   - Optional: create/enroll sbctl keys and verify/sign files.
+
+3. **Shim + MokManager setup**
+   - Copies shim and MokManager to the ESP and creates a boot entry.
+
+4. **Create MOK + sign kernel/GRUB**
+   - Creates a MOK, signs kernel(s), optionally signs an existing GRUB EFI, and copies `MOK.cer` to the ESP.
+
+5. **Install Post-Update hooks (watchers)**
+   - Installs pacman hooks + watcher service to auto rebuild/re-sign.
+
+6. **Rebuild standalone GRUB + sign + copy fallback**
+   - Builds and signs a standalone GRUB EFI with embedded assets.
+
+7. **Full typical sequence**
+   - Runs 3 → 4 → 6 in order, then prompts for watchers and optional snapshot support.
+
+8. **Optional: grub-btrfs snapshot support**
+   - Installs grub-btrfs and optional snapshot tooling (Snapper/Timeshift).
+
+9. **Health check**
+   - Audits installed files, service status, and signing status.
+
+</details>
+
+---
+
+## Prompt Guide
+
+<details>
+<summary>Common prompts explained</summary>
+
+**ESP mount path**
+- Use `/boot/efi` or `/efi`. Pick the VFAT mount containing `EFI/`.
+  If you see multiple VFAT mounts, the right one usually contains an `EFI/` directory.
+
+**Disk + partition for efibootmgr**
+- Example: `/dev/nvme0n1` + `1`
+
+**BootNext vs BootOrder**
+- BootNext is one-time and safest for testing.
+- BootOrder is permanent; use after confirming boots are stable.
+
+**MOK key paths**
+- Default is `/etc/secureboot/mok`. Don’t overwrite if you already enrolled a key.
+  If you do overwrite, you must re-enroll the new `MOK.cer` in MokManager.
+
+**GRUB_ID**
+- Controls vendor path: `ESP/EFI/<GRUB_ID>/grubx64.efi`.
+
+**Theme / splash**
+- Optional. If omitted, standalone GRUB builds without embedded assets.
+  Embedding is recommended if you want consistent visuals under Secure Boot.
+
+</details>
+
+---
+
+## What Gets Installed (File Map)
+
+- Config:
+  - `/etc/secureboot/grub-standalone.conf`
+- Scripts:
+  - `/usr/local/sbin/grub-standalone-rebuild.sh`
+  - `/usr/local/sbin/grub-standalone-watch.sh`
+  - `/usr/local/sbin/kernel-sbsign-all.sh`
+- Hooks:
+  - `/etc/pacman.d/hooks/95-kernel-sbsign.hook`
+  - `/etc/pacman.d/hooks/99-grub-standalone.hook`
+- Service:
+  - `/etc/systemd/system/grub-standalone-watch.service`
+- Backups:
+  - `/var/lib/secureboot/grub-standalone/backups/`
+  - `/var/lib/secureboot/kernel-sbsign/backups/`
+  - `ESP/EFI/<GRUB_ID>/backup/` and `ESP/EFI/BOOT/backup/`
+
+---
+
+## Backups and Retention
+
+This project creates **timestamped backups** and metadata so restores can be verified as created by the script.
+
+- Backup filenames include timestamps: `*.sb-install.<UTC timestamp>.bak`
+- Metadata files: `*.bak.meta` contain `created_by=sb-install`, source path, and run ID
+- A `latest` backup (`.bak`) is also stored for convenience
+- Backup retention is controlled by `SB_BACKUP_KEEP` (default `5`)
+
+You can override backup retention like this:
+
+```bash
+SB_BACKUP_KEEP=10 ./install.sh
+```
+
+Backups are your safety net. If something goes sideways, these are what let you recover quickly.
+
+---
+
+## Automatic Updates
+
+Two mechanisms keep the system current:
+
+1. **pacman hook**
+   - Runs after package updates to rebuild + sign the standalone GRUB.
+
+2. **watcher service**
+   - Watches config/theme directories for manual edits and triggers rebuild.
+
+The rebuild script is safe to run repeatedly; it uses a lock file to avoid concurrent runs.
+
+If you are curious about what triggers rebuilds, check the hook files and the watcher service logs.
+
+---
+
+## Health Check and Verification
+
+The installer includes a health check (menu option 9). You can also manually verify:
+
+```bash
+systemctl is-enabled grub-standalone-watch.service
+systemctl status grub-standalone-watch.service
+```
+
+```bash
+source /etc/secureboot/grub-standalone.conf
+sudo sbverify --list "$ESP_MOUNT/EFI/$GRUB_ID/grubx64.efi"
+```
+
+---
+
+## Troubleshooting
+
+<details>
+<summary>Common issues and fixes</summary>
+
+**MokManager keeps appearing**
+- Enroll the correct `MOK.cer` from the ESP.
+
+**“bad shim lock signature”**
+- The binary is not signed by the enrolled MOK. Rebuild + re-sign.
+
+**Watcher inactive**
+- `sudo systemctl daemon-reload` then `sudo systemctl enable --now grub-standalone-watch.service`
+
+**ESP not mounted**
+- Confirm `ESP_MOUNT` and `ESP_DEV` in `/etc/secureboot/grub-standalone.conf`.
+
+</details>
+
+If you are stuck, grab the logs and the health check output first. It is usually enough to spot what went wrong.
+
+---
+
+## Recovery / Rollback
+
+<details>
+<summary>Emergency recovery steps</summary>
+
+If Secure Boot fails:
+
+1. Disable Secure Boot in firmware.
+2. Boot normally or from live USB.
+3. Rebuild standalone GRUB:
+
+```bash
+sudo /usr/local/sbin/grub-standalone-rebuild.sh
+```
+
+ESP backups exist in:
+
+- `/var/lib/secureboot/grub-standalone/backups/`
+- `ESP/EFI/<GRUB_ID>/backup/`
+
+</details>
+
+Take your time here. Recovery is easier when you do one small, verified step at a time.
+
+---
+
+## Uninstall
+
+A dedicated uninstall script is included:
+
+```bash
+chmod +x uninstall.sh
+./uninstall.sh
+```
+
+It will prompt for each major removal step:
+
+- watcher service + hooks + scripts
+- secureboot config/state dirs
+- MOK keys
+- ESP shim/MOK files
+- ESP standalone GRUB binaries
+- Shim NVRAM entries
+
+If you are unsure about a step, answer No and move on. You can rerun the uninstall later.
+
+---
+
+## Security Notes
+
+- **Never share private keys** (`MOK.key`).
+- It is safe to share `MOK.cer` fingerprints and logs.
+- Keep backups; they are your recovery rope.
+- Treat the MOK private key like a password: local only, no sync, no paste.
+
+---
+
+## FAQ
+
+<details>
+<summary>Answers to common questions</summary>
+
+**Do I need sbctl?**
+- No. sbctl is optional. The main workflow uses shim + MOK.
+
+**Does this work with LUKS?**
+- Yes, especially because standalone GRUB embeds config/assets.
+
+**Can I change themes later?**
+- Yes. Update the theme path, rebuild standalone GRUB, and it will embed the new assets.
+
+</details>
+
+---
+
+## Repository Layout
+
+- `install.sh` - main interactive installer
+- `uninstall.sh` - removal script
+- `lib/` - helper and health check functions
+- `grub-standalone/` - build scripts + service/hook templates
+- `kernel/` - kernel signing scripts + pacman hook template
+
+---
+
+## Command Cheatsheet
+
+<details>
+<summary>Useful commands</summary>
+
+Identify ESP:
+
+```bash
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
+findmnt -t vfat
+```
+
+Watch service logs:
+
+```bash
+sudo journalctl -fu grub-standalone-watch.service
+```
+
+Rebuild standalone GRUB now:
+
+```bash
+sudo /usr/local/sbin/grub-standalone-rebuild.sh
+```
+
+Sign kernels now:
+
+```bash
+sudo /usr/local/sbin/kernel-sbsign-all.sh
+```
+
+</details>
