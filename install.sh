@@ -368,8 +368,9 @@ EOF
 
   install_watchers
 
-  say "Running initial rebuild now (so you're good immediately)"
-  sudo /usr/local/sbin/grub-standalone-rebuild.sh || true
+  confirm "Would you like to Install Snapshot Support? [y/n]" 0 && install_grub_btrfs_support
+
+  run_grub_builder
 }
 
 # -----------------------------
@@ -430,13 +431,7 @@ install_grub_btrfs_support() {
   # Restart watcher so it rereads grub-standalone.conf
   sudo systemctl restart grub-standalone-watch.service >/dev/null 2>&1 || true
 
-  # Rebuild once now so the snapshot submenu is embedded immediately (if snapshots exist)
-  if sudo test -x /usr/local/sbin/grub-standalone-rebuild.sh; then
-    say "Running standalone rebuild now (to bake snapshot menu in, if any exist)..."
-    sudo /usr/local/sbin/grub-standalone-rebuild.sh || true
-  else
-    warn "Standalone rebuild script missing: /usr/local/sbin/grub-standalone-rebuild.sh"
-  fi
+  run_grub_builder
 
   say "grub-btrfs support done."
   say "Tip: watch logs with: journalctl -fu grub-standalone-watch.service"

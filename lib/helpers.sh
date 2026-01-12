@@ -483,6 +483,18 @@ patch_grub_font_for_secureboot() {
   say "Regenerated: /boot/grub/grub.cfg"
 }
 
+run_grub_builder() {
+  local builderpath="/usr/local/sbin/grub-standalone-rebuild.sh"
+
+  say "Checking Grub Standalone Rebuild Script ..."
+  if sudo test -x "$builderpath"; then
+    say "Running Grub Standalone Rebuild ..."
+    sudo "$builderpath" || true
+  else
+    warn "Standalone rebuild script missing: $builderpath"
+  fi
+}
+
 # -------------------------
 # Snapshot & Grub-Btrfs Helpers
 # -------------------------
