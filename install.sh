@@ -13,6 +13,7 @@ KERNEL_SIGN_HOOK_TEMPLATE="$SCRIPT_DIR/kernel/kernel-sbsign.hook"
 GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone.hook"
 WATCHER_SCRIPT_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.sh"
 WATCHER_SERVICE_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.service"
+WATCHER_PATH_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.path"
 STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/grub-standalone/build-grub-standalone.sh"
 ENV_FILE="$SCRIPT_DIR/lib/env.sh"
 SB_INSTALL_RUN_ID="${SB_INSTALL_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
@@ -257,6 +258,7 @@ install_watchers() {
   [[ -f "$GRUB_HOOK_TEMPLATE"          ]] || die "Missing template: $GRUB_HOOK_TEMPLATE"
   [[ -f "$WATCHER_SCRIPT_TEMPLATE"     ]] || die "Missing template: $WATCHER_SCRIPT_TEMPLATE"
   [[ -f "$WATCHER_SERVICE_TEMPLATE"    ]] || die "Missing template: $WATCHER_SERVICE_TEMPLATE"
+  [[ -f "$WATCHER_PATH_TEMPLATE"       ]] || die "Missing template: $WATCHER_PATH_TEMPLATE"
 
   # Install kernel signing script + pacman hook (PostTransaction)
   say "Installing kernel signing script to /usr/local/sbin/kernel-sbsign-all.sh"
@@ -273,20 +275,22 @@ install_watchers() {
   say "Installing pacman hook to /etc/pacman.d/hooks/99-grub-standalone.hook"
   sudo install -D -m 0644 "$GRUB_HOOK_TEMPLATE" /etc/pacman.d/hooks/99-grub-standalone.hook
 
-  say "Installing recursive watch script + service (manual edits trigger rebuilds)"
+  say "Installing watch script + systemd path/service (manual edits trigger rebuilds)"
   sudo install -D -m 0755 "$WATCHER_SCRIPT_TEMPLATE" /usr/local/sbin/grub-standalone-watch.sh
   sudo install -D -m 0644 "$WATCHER_SERVICE_TEMPLATE" /etc/systemd/system/grub-standalone-watch.service
+  sudo install -D -m 0644 "$WATCHER_PATH_TEMPLATE" /etc/systemd/system/grub-standalone-watch.path
 
   sudo systemctl daemon-reload
-  sudo systemctl enable --now grub-standalone-watch.service
-  say "Watcher enabled: grub-standalone-watch.service"
+  sudo systemctl disable --now grub-standalone-watch.service >/dev/null 2>&1 || true
+  sudo systemctl enable --now grub-standalone-watch.path
+  say "Watcher enabled: grub-standalone-watch.path"
 
 }
 
 install_grub_standalone_maintenance() {
   local esp="$1"
 
-  confirm "Install grub + sbsigntools + inotify-tools (standalone build + watcher)?" 0 && yay_install grub sbsigntools inotify-tools
+  confirm "Install grub + sbsigntools (standalone build + watcher)?" 0 && yay_install grub sbsigntools
 
   # Detect ESP device for hook-time mounts
   local esp_dev
@@ -364,8 +368,6 @@ THEME_NAME="$theme_name"
 
 SPLASH_SRC="$splash_src"
 WATCH_DIRS="$watch_dirs"
-DEBOUNCE_SECS="2"
-INOTIFY_EVENTS="close_write,move,create,delete,attrib"
 EOF
 
   install_watchers
@@ -490,8 +492,8 @@ main() {
   read -r -p "Enter selection (1-9): " sel
   case "$sel" in
     1)
-      confirm "Install sbctl, shim-signed, sbsigntools, inotify-tools, efibootmgr, grub, openssl?" 0 && \
-        yay_install sbctl shim-signed sbsigntools inotify-tools efibootmgr grub openssl
+      confirm "Install sbctl, shim-signed, sbsigntools, efibootmgr, grub, openssl?" 0 && \
+        yay_install sbctl shim-signed sbsigntools efibootmgr grub openssl
       ;;
     2)
       run_sbctl_flow

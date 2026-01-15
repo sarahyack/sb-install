@@ -27,7 +27,6 @@ checkhealth() {
   local -a cmds=(
     grub-mkstandalone grub-mkconfig
     sbsign sbverify
-    inotifywait
     findmnt mount awk sed grep
     systemctl journalctl
   )
@@ -37,7 +36,7 @@ checkhealth() {
     else
       # some are truly required for correct operation
       case "$c" in
-        grub-mkstandalone|grub-mkconfig|sbsign|sbverify|inotifywait)
+        grub-mkstandalone|grub-mkconfig|sbsign|sbverify)
           h_fail "Missing required command: $c"
           ;;
         *)
@@ -55,6 +54,7 @@ checkhealth() {
     "/usr/local/sbin/grub-standalone-rebuild.sh"
     "/usr/local/sbin/grub-standalone-watch.sh"
     "/etc/systemd/system/grub-standalone-watch.service"
+    "/etc/systemd/system/grub-standalone-watch.path"
   )
 
   for f in "${must_files[@]}"; do
@@ -101,7 +101,7 @@ checkhealth() {
       h_ok "WATCH_DIRS set"
       h_info "WATCH_DIRS=$WATCH_DIRS"
     else
-      h_warn "WATCH_DIRS is empty (watcher will have nothing to watch)"
+      h_warn "WATCH_DIRS is empty (update grub-standalone-watch.path if you rely on custom watch dirs)"
     fi
   fi
 
@@ -119,39 +119,28 @@ checkhealth() {
     fi
   fi
 
-  # --- 6) Watcher service status ---
-  local en act pid args
-  en="$(systemctl is-enabled grub-standalone-watch.service 2>/dev/null || true)"
-  act="$(systemctl is-active  grub-standalone-watch.service 2>/dev/null || true)"
+  # --- 6) Watcher path + service status ---
+  local path_en path_act svc_state svc_result
+  path_en="$(systemctl is-enabled grub-standalone-watch.path 2>/dev/null || true)"
+  path_act="$(systemctl is-active  grub-standalone-watch.path 2>/dev/null || true)"
 
-  if [[ "$en" == "enabled" ]]; then
-    h_ok "watcher enabled (systemd): $en"
+  if [[ "$path_en" == "enabled" ]]; then
+    h_ok "watcher path enabled (systemd): $path_en"
   else
-    h_fail "watcher not enabled (systemd): $en"
+    h_fail "watcher path not enabled (systemd): $path_en"
   fi
 
-  if [[ "$act" == "active" ]]; then
-    h_ok "watcher active: $act"
+  if [[ "$path_act" == "active" ]]; then
+    h_ok "watcher path active: $path_act"
   else
-    h_fail "watcher not active: $act (check logs below)"
+    h_fail "watcher path not active: $path_act (check logs below)"
   fi
 
-  pid="$(systemctl show -p MainPID --value grub-standalone-watch.service 2>/dev/null || true)"
-  args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-  # 1) If MainPID is our watcher script, that's fine (systemd often tracks the shell script, not the inotify child).
-  if echo "$args" | grep -qE '(^|[[:space:]])(bash[[:space:]]+)?(/usr/local/sbin/)?grub-standalone-watch\.sh([[:space:]]|$)'; then
-    h_ok "watcher MainPID is grub-standalone-watch.sh (normal)"
-  # 2) If MainPID itself is inotifywait, also fine.
-  elif echo "$args" | grep -q "inotifywait"; then
-    h_ok "watcher MainPID appears to be running inotifywait"
-  # 3) Otherwise, check whether the service cgroup contains inotifywait.
-  elif systemctl status grub-standalone-watch.service --no-pager 2>/dev/null | grep -q "inotifywait"; then
-    h_ok "watcher cgroup contains inotifywait"
-  else
-    h_warn "watcher is active, but couldn't confirm inotifywait (MainPID args: $args)"
-  fi
+  svc_state="$(systemctl is-active grub-standalone-watch.service 2>/dev/null || true)"
+  svc_result="$(systemctl show -p Result --value grub-standalone-watch.service 2>/dev/null || true)"
+  h_info "watcher service state: $svc_state (last result: ${svc_result:-unknown})"
 
-  if [[ "$act" != "active" || -z "$pid" || "$pid" == "0" ]]; then
+  if [[ "$path_act" != "active" ]]; then
     h_info "Last watcher logs:"
     journalctl -u grub-standalone-watch.service -n 60 --no-pager 2>/dev/null | sed 's/^/    /'
   fi

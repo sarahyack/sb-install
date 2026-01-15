@@ -1,0 +1,17 @@
+[Unit]
+Description=Watch GRUB inputs and trigger standalone rebuild
+
+[Path]
+Unit=grub-standalone-watch.service
+
+# Always worth watching:
+PathChanged=/etc/default/grub
+PathChanged=/etc/grub.d
+PathChanged=/etc/secureboot/grub-standalone.conf
+
+# Theme + splash (adjust to your real values):
+PathChanged=/boot/grub/themes
+PathChanged=/usr/share/endeavouros/splash.png
+
+[Install]
+WantedBy=multi-user.target

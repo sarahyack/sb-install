@@ -121,10 +121,12 @@ restore_or_remove() {
 
 uninstall_watchers_and_hooks() {
   say "Stopping watcher service"
+  sudo systemctl disable --now grub-standalone-watch.path >/dev/null 2>&1 || true
   sudo systemctl disable --now grub-standalone-watch.service >/dev/null 2>&1 || true
-  sudo systemctl reset-failed grub-standalone-watch.service >/dev/null 2>&1 || true
+  sudo systemctl reset-failed grub-standalone-watch.service grub-standalone-watch.path >/dev/null 2>&1 || true
 
   rm_file /etc/systemd/system/grub-standalone-watch.service
+  rm_file /etc/systemd/system/grub-standalone-watch.path
   sudo systemctl daemon-reload >/dev/null 2>&1 || true
 
   rm_file /etc/pacman.d/hooks/95-kernel-sbsign.hook

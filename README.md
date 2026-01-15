@@ -121,7 +121,7 @@ findmnt -t vfat
 Each option is safe to run individually if you understand the scope. You can rerun options later without redoing the entire flow.
 
 1. **Install packages only**
-   - Installs required tools (sbctl/shim/sbsigntools/inotify-tools/grub/efibootmgr/openssl).
+   - Installs required tools (sbctl/shim/sbsigntools/grub/efibootmgr/openssl).
 
 2. **sbctl flow**
    - Optional: create/enroll sbctl keys and verify/sign files.
@@ -133,7 +133,7 @@ Each option is safe to run individually if you understand the scope. You can rer
    - Creates a MOK, signs kernel(s), optionally signs an existing GRUB EFI, and copies `MOK.cer` to the ESP.
 
 5. **Install Post-Update hooks (watchers)**
-   - Installs pacman hooks + watcher service to auto rebuild/re-sign.
+   - Installs pacman hooks + systemd path/service to auto rebuild/re-sign.
 
 6. **Rebuild standalone GRUB + sign + copy fallback**
    - Builds and signs a standalone GRUB EFI with embedded assets.
@@ -195,6 +195,7 @@ Each option is safe to run individually if you understand the scope. You can rer
   - `/etc/pacman.d/hooks/99-grub-standalone.hook`
 - Service:
   - `/etc/systemd/system/grub-standalone-watch.service`
+  - `/etc/systemd/system/grub-standalone-watch.path`
 - Backups:
   - `/var/lib/secureboot/grub-standalone/backups/`
   - `/var/lib/secureboot/kernel-sbsign/backups/`
@@ -242,8 +243,8 @@ If you are curious about what triggers rebuilds, check the hook files and the wa
 The installer includes a health check (menu option 9). You can also manually verify:
 
 ```bash
-systemctl is-enabled grub-standalone-watch.service
-systemctl status grub-standalone-watch.service
+systemctl is-enabled grub-standalone-watch.path
+systemctl status grub-standalone-watch.path
 ```
 
 ```bash
@@ -265,7 +266,7 @@ sudo sbverify --list "$ESP_MOUNT/EFI/$GRUB_ID/grubx64.efi"
 - The binary is not signed by the enrolled MOK. Rebuild + re-sign.
 
 **Watcher inactive**
-- `sudo systemctl daemon-reload` then `sudo systemctl enable --now grub-standalone-watch.service`
+- `sudo systemctl daemon-reload` then `sudo systemctl enable --now grub-standalone-watch.path`
 
 **ESP not mounted**
 - Confirm `ESP_MOUNT` and `ESP_DEV` in `/etc/secureboot/grub-standalone.conf`.
