@@ -189,6 +189,7 @@ Each option is safe to run individually if you understand the scope. You can rer
 - Scripts:
   - `/usr/local/sbin/grub-standalone-rebuild.sh`
   - `/usr/local/sbin/grub-standalone-watch.sh`
+  - `/usr/local/sbin/secureboot-refresh`
   - `/usr/local/sbin/kernel-sbsign-all.sh`
 - Hooks:
   - `/etc/pacman.d/hooks/95-kernel-sbsign.hook`
@@ -231,6 +232,21 @@ Two mechanisms keep the system current:
 
 2. **watcher service**
    - Watches config/theme directories for manual edits and triggers rebuild.
+
+You can also run a manual refresh any time:
+
+```bash
+sudo secureboot-refresh
+```
+
+This signs kernels (if needed) and rebuilds/re-signs the standalone GRUB EFI.
+
+If you prefer manual refresh only, disable the watcher and keep using `secureboot-refresh`:
+
+```bash
+sudo systemctl disable --now grub-standalone-watch.path
+sudo systemctl disable --now grub-standalone-watch.service
+```
 
 The rebuild script is safe to run repeatedly; it uses a lock file to avoid concurrent runs.
 

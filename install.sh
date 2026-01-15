@@ -14,6 +14,7 @@ GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone.hook"
 WATCHER_SCRIPT_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.sh"
 WATCHER_SERVICE_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.service"
 WATCHER_PATH_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.path"
+REFRESH_SCRIPT_TEMPLATE="$SCRIPT_DIR/refresh.sh"
 STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/grub-standalone/build-grub-standalone.sh"
 ENV_FILE="$SCRIPT_DIR/lib/env.sh"
 SB_INSTALL_RUN_ID="${SB_INSTALL_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
@@ -259,6 +260,7 @@ install_watchers() {
   [[ -f "$WATCHER_SCRIPT_TEMPLATE"     ]] || die "Missing template: $WATCHER_SCRIPT_TEMPLATE"
   [[ -f "$WATCHER_SERVICE_TEMPLATE"    ]] || die "Missing template: $WATCHER_SERVICE_TEMPLATE"
   [[ -f "$WATCHER_PATH_TEMPLATE"       ]] || die "Missing template: $WATCHER_PATH_TEMPLATE"
+  [[ -f "$REFRESH_SCRIPT_TEMPLATE"     ]] || die "Missing template: $REFRESH_SCRIPT_TEMPLATE"
 
   # Install kernel signing script + pacman hook (PostTransaction)
   say "Installing kernel signing script to /usr/local/sbin/kernel-sbsign-all.sh"
@@ -275,6 +277,9 @@ install_watchers() {
   say "Installing pacman hook to /etc/pacman.d/hooks/99-grub-standalone.hook"
   sudo install -D -m 0644 "$GRUB_HOOK_TEMPLATE" /etc/pacman.d/hooks/99-grub-standalone.hook
 
+  say "Installing manual refresh helper to /usr/local/sbin/secureboot-refresh"
+  sudo install -D -m 0755 "$REFRESH_SCRIPT_TEMPLATE" /usr/local/sbin/secureboot-refresh
+
   say "Installing watch script + systemd path/service (manual edits trigger rebuilds)"
   sudo install -D -m 0755 "$WATCHER_SCRIPT_TEMPLATE" /usr/local/sbin/grub-standalone-watch.sh
   sudo install -D -m 0644 "$WATCHER_SERVICE_TEMPLATE" /etc/systemd/system/grub-standalone-watch.service
@@ -282,8 +287,13 @@ install_watchers() {
 
   sudo systemctl daemon-reload
   sudo systemctl disable --now grub-standalone-watch.service >/dev/null 2>&1 || true
-  sudo systemctl enable --now grub-standalone-watch.path
-  say "Watcher enabled: grub-standalone-watch.path"
+  if confirm "Enable watcher now (systemd path unit)?" 0; then
+    sudo systemctl enable --now grub-standalone-watch.path
+    say "Watcher enabled: grub-standalone-watch.path"
+  else
+    say "Watcher not enabled. You can run: sudo secureboot-refresh"
+  fi
+  say "Manual refresh command: sudo secureboot-refresh"
 
 }
 

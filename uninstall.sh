@@ -135,6 +135,7 @@ uninstall_watchers_and_hooks() {
   rm_file /usr/local/sbin/kernel-sbsign-all.sh
   rm_file /usr/local/sbin/grub-standalone-rebuild.sh
   rm_file /usr/local/sbin/grub-standalone-watch.sh
+  rm_file /usr/local/sbin/secureboot-refresh
 }
 
 uninstall_secureboot_config_and_state() {
