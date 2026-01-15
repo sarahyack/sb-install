@@ -309,14 +309,18 @@ checkhealth() {
     fi
 
     if [[ -n "${WATCH_DIRS:-}" && -n "${snapdir:-}" ]]; then
-      # Normalize just for comparison safety
-      local wd_norm
-      wd_norm="$(printf '%s' "$WATCH_DIRS" | tr '\n\t' ' ' | xargs)"
-      if str_in_list "$wd_norm" "$snapdir"; then
-        h_ok "WATCH_DIRS includes snapshot dir: $snapdir"
+      if [[ "$snapdir" == "/.snapshots" ]]; then
+        h_info "Skipping WATCH_DIRS check for /.snapshots (explicitly excluded)"
       else
-        h_warn "WATCH_DIRS does NOT include snapshot dir: $snapdir (new snapshots won't trigger rebuild)"
-        h_info "Fix: run snapshot install option again or add it via conf_add_watch_dir"
+        # Normalize just for comparison safety
+        local wd_norm
+        wd_norm="$(printf '%s' "$WATCH_DIRS" | tr '\n\t' ' ' | xargs)"
+        if str_in_list "$wd_norm" "$snapdir"; then
+          h_ok "WATCH_DIRS includes snapshot dir: $snapdir"
+        else
+          h_warn "WATCH_DIRS does NOT include snapshot dir: $snapdir (new snapshots won't trigger rebuild)"
+          h_info "Fix: run snapshot install option again or add it via conf_add_watch_dir"
+        fi
       fi
     fi
 

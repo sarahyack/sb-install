@@ -348,7 +348,13 @@ install_grub_standalone_maintenance() {
 
   local default_watch_dirs="/etc/default /etc/grub.d /boot/grub/themes /usr/share/endeavouros"
   local existing_watch_dirs="$(read_existing_watch_dirs || true)"
-  local watch_dirs="${existing_watch_dirs:-$default_watch_dirs}"
+  local watch_dirs_src="${existing_watch_dirs:-$default_watch_dirs}"
+  local watch_dirs=""
+  for d in $watch_dirs_src; do
+    [[ "$d" == "/.snapshots" ]] && continue
+    watch_dirs+="${d} "
+  done
+  watch_dirs="${watch_dirs%% }"
 
   say "Writing config: /etc/secureboot/grub-standalone.conf"
   sudo install -d -m 0755 /etc/secureboot
@@ -425,11 +431,17 @@ install_grub_btrfs_support() {
       ;;
   esac
 
+  conf_remove_watch_dir "/.snapshots"
+
   disable_grub_btrfsd
 
   # Add snapshot dir to your existing watcher (so snapshot creation triggers rebuild)
   if [[ -n "$snapdir" ]]; then
-    conf_add_watch_dir "$snapdir"
+    if [[ "$snapdir" == "/.snapshots" ]]; then
+      warn "Not adding /.snapshots to WATCH_DIRS (explicitly excluded)."
+    else
+      conf_add_watch_dir "$snapdir"
+    fi
   fi
 
   # Restart watcher so it rereads grub-standalone.conf
