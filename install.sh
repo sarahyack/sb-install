@@ -11,9 +11,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KERNEL_SIGN_SCRIPT_TEMPLATE="$SCRIPT_DIR/kernel/kernel-sbsign-all.sh"
 KERNEL_SIGN_HOOK_TEMPLATE="$SCRIPT_DIR/kernel/kernel-sbsign.hook"
 GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone.hook"
-WATCHER_SCRIPT_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.sh"
-WATCHER_SERVICE_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.service"
-WATCHER_PATH_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone-watch.path"
 REFRESH_SCRIPT_TEMPLATE="$SCRIPT_DIR/refresh.sh"
 STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/grub-standalone/build-grub-standalone.sh"
 ENV_FILE="$SCRIPT_DIR/lib/env.sh"
@@ -36,7 +33,7 @@ This script can:
   A) Run sbctl workflow (create/enroll keys, verify, sign complained files)
   B) Set up shim + MokManager on the ESP and create an NVRAM entry
   C) Create a MOK (RSA 2048) and sign kernel + GRUB EFI binaries using sbsigntools
-  D) Install Watcher hooks for future update support
+  D) Install post-update hooks for future update support
   E) Reinstall GRUB with GRUB_MODULES + sbat.csv, then sign + copy to fallback path
   F) Set Up Full Support for Grub-Btrfs & Snapshots (Snapper or Timeshift)
   G) Run a Health Check for Everything This Script Installs/Signs
@@ -249,17 +246,14 @@ sign_kernel_and_grub_with_mok() {
   echo "  CER : $MOK_CER"
 }
 
-install_watchers() {
-  confirm "Install Watchers for Post-Update Resigning & Rebuilding (kernel + grubcfg)?" 0 \
-      || { say "Skipping watcher/hook install."; return 0; }
+install_hooks() {
+  confirm "Install post-update hooks for re-signing & rebuilding (kernel + grubcfg)?" 0 \
+      || { say "Skipping hook install."; return 0; }
 
   [[ -f "$KERNEL_SIGN_SCRIPT_TEMPLATE" ]] || die "Missing template: $KERNEL_SIGN_SCRIPT_TEMPLATE"
   [[ -f "$KERNEL_SIGN_HOOK_TEMPLATE"   ]] || die "Missing template: $KERNEL_SIGN_HOOK_TEMPLATE"
   [[ -f "$STANDALONE_GRUB_BUILDER"     ]] || die "Missing template: $STANDALONE_GRUB_BUILDER"
   [[ -f "$GRUB_HOOK_TEMPLATE"          ]] || die "Missing template: $GRUB_HOOK_TEMPLATE"
-  [[ -f "$WATCHER_SCRIPT_TEMPLATE"     ]] || die "Missing template: $WATCHER_SCRIPT_TEMPLATE"
-  [[ -f "$WATCHER_SERVICE_TEMPLATE"    ]] || die "Missing template: $WATCHER_SERVICE_TEMPLATE"
-  [[ -f "$WATCHER_PATH_TEMPLATE"       ]] || die "Missing template: $WATCHER_PATH_TEMPLATE"
   [[ -f "$REFRESH_SCRIPT_TEMPLATE"     ]] || die "Missing template: $REFRESH_SCRIPT_TEMPLATE"
 
   # Install kernel signing script + pacman hook (PostTransaction)
@@ -280,27 +274,13 @@ install_watchers() {
   say "Installing manual refresh helper to /usr/local/sbin/secureboot-refresh"
   sudo install -D -m 0755 "$REFRESH_SCRIPT_TEMPLATE" /usr/local/sbin/secureboot-refresh
 
-  say "Installing watch script + systemd path/service (manual edits trigger rebuilds)"
-  sudo install -D -m 0755 "$WATCHER_SCRIPT_TEMPLATE" /usr/local/sbin/grub-standalone-watch.sh
-  sudo install -D -m 0644 "$WATCHER_SERVICE_TEMPLATE" /etc/systemd/system/grub-standalone-watch.service
-  sudo install -D -m 0644 "$WATCHER_PATH_TEMPLATE" /etc/systemd/system/grub-standalone-watch.path
-
-  sudo systemctl daemon-reload
-  sudo systemctl disable --now grub-standalone-watch.service >/dev/null 2>&1 || true
-  if confirm "Enable watcher now (systemd path unit)?" 0; then
-    sudo systemctl enable --now grub-standalone-watch.path
-    say "Watcher enabled: grub-standalone-watch.path"
-  else
-    say "Watcher not enabled. You can run: sudo secureboot-refresh"
-  fi
   say "Manual refresh command: sudo secureboot-refresh"
-
 }
 
 install_grub_standalone_maintenance() {
   local esp="$1"
 
-  confirm "Install grub + sbsigntools (standalone build + watcher)?" 0 && yay_install grub sbsigntools
+  confirm "Install grub + sbsigntools (standalone build + hooks)?" 0 && yay_install grub sbsigntools
 
   # Detect ESP device for hook-time mounts
   local esp_dev
@@ -356,16 +336,6 @@ install_grub_standalone_maintenance() {
       | paste -sd' ' -
   )"
 
-  local default_watch_dirs="/etc/default /etc/grub.d /boot/grub/themes /usr/share/endeavouros"
-  local existing_watch_dirs="$(read_existing_watch_dirs || true)"
-  local watch_dirs_src="${existing_watch_dirs:-$default_watch_dirs}"
-  local watch_dirs=""
-  for d in $watch_dirs_src; do
-    [[ "$d" == "/.snapshots" ]] && continue
-    watch_dirs+="${d} "
-  done
-  watch_dirs="${watch_dirs%% }"
-
   say "Writing config: /etc/secureboot/grub-standalone.conf"
   sudo install -d -m 0755 /etc/secureboot
   sudo tee /etc/secureboot/grub-standalone.conf >/dev/null <<EOF
@@ -383,10 +353,9 @@ THEME_DIR="$theme_dir"
 THEME_NAME="$theme_name"
 
 SPLASH_SRC="$splash_src"
-WATCH_DIRS="$watch_dirs"
 EOF
 
-  install_watchers
+  install_hooks
 
   confirm "Would you like to Install Snapshot Support? [y/n]" 0 && install_grub_btrfs_support
 
@@ -421,7 +390,6 @@ install_grub_btrfs_support() {
       ensure_snapper_root_config || warn "Snapper config step may have failed; you can create it later."
       snapdir="$(detect_snapper_snapshot_dir)"
       say "Detected Snapper snapshot dir: $snapdir"
-      conf_add_watch_dir "/etc/snapper"
       confirm "Install snapper GUI? (btrfs-assistant)" 0 && yay_install btrfs-assistant
       confirm "Install Auto-Snapshot Support For Updates? (snap-pac) [y/n]" 0 && yay_install snap-pac
       ;;
@@ -430,7 +398,6 @@ install_grub_btrfs_support() {
       snapdir="$(detect_timeshift_snapshot_dir)"
       say "Detected/assumed Timeshift snapshot dir: $snapdir"
       warn "Reminder: Timeshift must be configured in BTRFS mode for grub-btrfs menus to work."
-      conf_add_watch_dir "/etc/timeshift"
       confirm "Install Auto-Snapshot Support For Updates? (timeshift-autosnap) [y/n]" 0 && yay_install timeshift-autosnap
       ;;
     3)
@@ -441,26 +408,12 @@ install_grub_btrfs_support() {
       ;;
   esac
 
-  conf_remove_watch_dir "/.snapshots"
-
   disable_grub_btrfsd
-
-  # Add snapshot dir to your existing watcher (so snapshot creation triggers rebuild)
-  if [[ -n "$snapdir" ]]; then
-    if [[ "$snapdir" == "/.snapshots" ]]; then
-      warn "Not adding /.snapshots to WATCH_DIRS (explicitly excluded)."
-    else
-      conf_add_watch_dir "$snapdir"
-    fi
-  fi
-
-  # Restart watcher so it rereads grub-standalone.conf
-  sudo systemctl restart grub-standalone-watch.service >/dev/null 2>&1 || true
 
   run_grub_builder
 
   say "grub-btrfs support done."
-  say "Tip: watch logs with: journalctl -fu grub-standalone-watch.service"
+  say "Tip: after snapshot creation, run: sudo secureboot-refresh"
 }
 
 run_healthcheck() {
@@ -530,8 +483,8 @@ main() {
       ;;
     5)
       confirm "WARNING: Only Run This Option After a Full Sequence Has Been Run on Your Machine! Continue (y/n)?" 0 \
-          || { say "Canceling Watcher Installation."; return 0; }
-      install_watchers
+          || { say "Canceling hook installation."; return 0; }
+      install_hooks
       ;;
     6)
       esp="$(get_esp_or_ask)"

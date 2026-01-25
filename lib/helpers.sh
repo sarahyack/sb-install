@@ -43,19 +43,6 @@ cert_fpr_sha256() {
     | sed -E 's/^.*=//; s/://g'
 }
 
-read_existing_watch_dirs() {
-  local conf="/etc/secureboot/grub-standalone.conf"
-  sudo test -r "$conf" || return 1
-  sudo awk -F= '
-    $1=="WATCH_DIRS" {
-      v=$2
-      sub(/^"/,"",v); sub(/"$/,"",v)
-      print v
-      exit
-    }
-  ' "$conf"
-}
-
 h_section() { echo; echo "== $* =="; }
 have_pkg() { pacman -Qq "$1" >/dev/null 2>&1; }
 str_in_list() { [[ " $1 " == *" $2 "* ]]; } # list string, token
@@ -570,89 +557,6 @@ conf_set_line_kv() {
   fi
 }
 
-conf_add_watch_dir() {
-  # Adds a directory to WATCH_DIRS if not already present.
-  # Keeps existing WATCH_DIRS if user customized it.
-  local dir="$1"
-  local conf="/etc/secureboot/grub-standalone.conf"
-  [[ -n "$dir" ]] || return 0
-  sudo test -f "$conf" || die "Missing $conf. Run the standalone install step first."
-
-  local cur
-  cur="$(conf_get_var_as_root "$conf" WATCH_DIRS)"
-  cur="$(normalize_watch_dirs "$cur")"
-  conf_set_line_kv "$conf" WATCH_DIRS "$cur"
-  if [[ -z "$cur" ]]; then
-    # Use your script defaults, plus the new dir.
-    cur="/etc/default /etc/grub.d /boot/grub/themes /usr/share/endeavouros"
-  fi
-
-  if [[ " $cur " == *" $dir "* ]]; then
-    say "WATCH_DIRS already contains: $dir"
-    return 0
-  fi
-
-  local new="${cur} ${dir}"
-  conf_set_line_kv "$conf" WATCH_DIRS "$new"
-  say "Added to WATCH_DIRS: $dir"
-}
-
-conf_remove_watch_dir() {
-  local dir="$1"
-  local conf="/etc/secureboot/grub-standalone.conf"
-  [[ -n "$dir" ]] || return 0
-  sudo test -f "$conf" || die "Missing $conf"
-
-  # normalize the requested dir too
-  while [[ "$dir" == *"//"* ]]; do dir="${dir//\/\//\/}"; done
-  [[ "$dir" != "/" ]] && dir="${dir%/}"
-
-  local cur norm new
-  cur="$(conf_get_var_as_root "$conf" WATCH_DIRS)"
-  norm="$(normalize_watch_dirs "$cur")"
-
-  # rebuild without the target
-  new="$(
-    for d in $norm; do
-      [[ "$d" == "$dir" ]] && continue
-      printf '%s ' "$d"
-    done | sed -E 's/[[:space:]]+$//'
-  )"
-
-  conf_set_line_kv "$conf" WATCH_DIRS "$new"
-  say "Removed from WATCH_DIRS (if present): $dir"
-}
-
-normalize_watch_dirs() {
-  # input: a single string of space-separated dirs
-  local s="${1:-}"
-  local -a arr out
-  declare -A seen
-
-  # split on whitespace
-  read -r -a arr <<< "$s"
-
-  for d in "${arr[@]}"; do
-    [[ -n "$d" ]] || continue
-
-    # collapse multiple slashes
-    while [[ "$d" == *"//"* ]]; do d="${d//\/\//\/}"; done
-
-    # strip trailing slash (except root)
-    [[ "$d" != "/" ]] && d="${d%/}"
-
-    [[ -n "$d" ]] || continue
-
-    # de-dup
-    if [[ -z "${seen[$d]+x}" ]]; then
-      out+=("$d")
-      seen["$d"]=1
-    fi
-  done
-
-  printf '%s\n' "${out[*]}"
-}
-
 detect_timeshift_snapshot_dir() {
   # Best-effort detection:
   # - First try snapshot_location from /etc/timeshift/timeshift.json
@@ -743,4 +647,3 @@ disable_grub_btrfsd() {
     sudo systemctl disable --now "$u" >/dev/null 2>&1 || true
   done
 }
-

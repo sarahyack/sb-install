@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/helpers.sh"
 
 checkhealth() {
-  say "Health Check: Secure Boot + Standalone GRUB + Watchers"
+  say "Health Check: Secure Boot + Standalone GRUB + Hooks"
 
   local FAIL=0 WARN=0
   h_ok()   { echo "  ✅ $*"; }
@@ -28,7 +28,6 @@ checkhealth() {
     grub-mkstandalone grub-mkconfig
     sbsign sbverify
     findmnt mount awk sed grep
-    systemctl journalctl
   )
   for c in "${cmds[@]}"; do
     if have_cmd "$c"; then
@@ -52,9 +51,7 @@ checkhealth() {
     "/etc/pacman.d/hooks/99-grub-standalone.hook"
     "/usr/local/sbin/kernel-sbsign-all.sh"
     "/usr/local/sbin/grub-standalone-rebuild.sh"
-    "/usr/local/sbin/grub-standalone-watch.sh"
-    "/etc/systemd/system/grub-standalone-watch.service"
-    "/etc/systemd/system/grub-standalone-watch.path"
+    "/usr/local/sbin/secureboot-refresh"
   )
 
   for f in "${must_files[@]}"; do
@@ -82,27 +79,19 @@ checkhealth() {
   fi
 
   # --- 4) Read config vars (only if config exists) ---
-  local ESP_MOUNT="" GRUB_ID="" MOK_KEY="" MOK_CRT="" WATCH_DIRS=""
+  local ESP_MOUNT="" GRUB_ID="" MOK_KEY="" MOK_CRT=""
   if sudo test -r "$CONF"; then
     ESP_MOUNT="$(conf_get_var_as_root "$CONF" ESP_MOUNT)"
     GRUB_ID="$(conf_get_var_as_root "$CONF" GRUB_ID)"
     MOK_KEY="$(conf_get_var_as_root "$CONF" MOK_KEY)"
     MOK_CRT="$(conf_get_var_as_root "$CONF" MOK_CRT)"
     MOK_CER="$(conf_get_var_as_root "$CONF" MOK_CER)"
-    WATCH_DIRS="$(conf_get_var_as_root "$CONF" WATCH_DIRS)"
 
     [[ -n "$ESP_MOUNT" ]] && h_ok "ESP_MOUNT=$ESP_MOUNT" || h_fail "ESP_MOUNT is empty in $CONF"
     [[ -n "$GRUB_ID" ]]   && h_ok "GRUB_ID=$GRUB_ID"     || h_fail "GRUB_ID is empty in $CONF"
     [[ -n "$MOK_KEY" ]]   && h_ok "MOK_KEY=$MOK_KEY"     || h_fail "MOK_KEY is empty in $CONF"
     [[ -n "$MOK_CRT" ]]   && h_ok "MOK_CRT=$MOK_CRT"     || h_fail "MOK_CRT is empty in $CONF"
     [[ -n "$MOK_CER" ]]   && h_ok "MOK_CRT=$MOK_CER"     || h_fail "MOK_CER is empty in $CONF"
-
-    if [[ -n "$WATCH_DIRS" ]]; then
-      h_ok "WATCH_DIRS set"
-      h_info "WATCH_DIRS=$WATCH_DIRS"
-    else
-      h_warn "WATCH_DIRS is empty (update grub-standalone-watch.path if you rely on custom watch dirs)"
-    fi
   fi
 
   # --- 5) ESP sanity ---
@@ -119,33 +108,7 @@ checkhealth() {
     fi
   fi
 
-  # --- 6) Watcher path + service status ---
-  local path_en path_act svc_state svc_result
-  path_en="$(systemctl is-enabled grub-standalone-watch.path 2>/dev/null || true)"
-  path_act="$(systemctl is-active  grub-standalone-watch.path 2>/dev/null || true)"
-
-  if [[ "$path_en" == "enabled" ]]; then
-    h_ok "watcher path enabled (systemd): $path_en"
-  else
-    h_fail "watcher path not enabled (systemd): $path_en"
-  fi
-
-  if [[ "$path_act" == "active" ]]; then
-    h_ok "watcher path active: $path_act"
-  else
-    h_fail "watcher path not active: $path_act (check logs below)"
-  fi
-
-  svc_state="$(systemctl is-active grub-standalone-watch.service 2>/dev/null || true)"
-  svc_result="$(systemctl show -p Result --value grub-standalone-watch.service 2>/dev/null || true)"
-  h_info "watcher service state: $svc_state (last result: ${svc_result:-unknown})"
-
-  if [[ "$path_act" != "active" ]]; then
-    h_info "Last watcher logs:"
-    journalctl -u grub-standalone-watch.service -n 60 --no-pager 2>/dev/null | sed 's/^/    /'
-  fi
-
-  # --- 7) Verify signatures (kernel + GRUB EFI) ---
+  # --- 6) Verify signatures (kernel + GRUB EFI) ---
   if [[ -n "$MOK_CRT" ]]; then
     if sudo test -r "$MOK_CRT"; then
       h_ok "MOK cert readable: $MOK_CRT"
@@ -202,7 +165,7 @@ checkhealth() {
     done
   fi
 
-  # --- 8) MOK enrollment (best-effort, optional) ---
+  # --- 7) MOK enrollment (best-effort, optional) ---
   # Use MOK_CER (DER) and run mokutil with sudo.
   if have_cmd mokutil && [[ -n "$MOK_CER" ]]; then
     h_info "Secure Boot state (mokutil):"
@@ -279,7 +242,7 @@ checkhealth() {
       h_warn "No snapshot tool detected (snapper/timeshift). grub-btrfs may show nothing."
     fi
 
-    # 5) Detect snapshot directory (best-effort) and confirm WATCH_DIRS includes it
+    # 5) Detect snapshot directory (best-effort)
     local snapdir=""
 
     if (( have_snapper == 1 )); then
@@ -308,27 +271,11 @@ checkhealth() {
       fi
     fi
 
-    if [[ -n "${WATCH_DIRS:-}" && -n "${snapdir:-}" ]]; then
-      if [[ "$snapdir" == "/.snapshots" ]]; then
-        h_info "Skipping WATCH_DIRS check for /.snapshots (explicitly excluded)"
-      else
-        # Normalize just for comparison safety
-        local wd_norm
-        wd_norm="$(printf '%s' "$WATCH_DIRS" | tr '\n\t' ' ' | xargs)"
-        if str_in_list "$wd_norm" "$snapdir"; then
-          h_ok "WATCH_DIRS includes snapshot dir: $snapdir"
-        else
-          h_warn "WATCH_DIRS does NOT include snapshot dir: $snapdir (new snapshots won't trigger rebuild)"
-          h_info "Fix: run snapshot install option again or add it via conf_add_watch_dir"
-        fi
-      fi
-    fi
-
-    # 6) Bonus: If any snapshots exist, hint that rebuild should generate menu
+    # 5) Bonus: If any snapshots exist, hint that rebuild should generate menu
     # (Soft check: we don't parse your embedded grub.cfg here.)
     if sudo test -x /usr/local/sbin/grub-standalone-rebuild.sh; then
       h_info "Tip: after creating a snapshot, run:"
-      h_info "  sudo /usr/local/sbin/grub-standalone-rebuild.sh"
+      h_info "  sudo secureboot-refresh"
       h_info "Then reboot and check for the snapshot submenu."
     fi
 
@@ -336,15 +283,14 @@ checkhealth() {
     h_info "Snapshot checks skipped."
   fi
 
-  # --- 9) Summary + exit code ---
+  # --- 8) Summary + exit code ---
   echo
   if [[ "$FAIL" -eq 0 ]]; then
     say "Health Check Result: PASS ✅  (warnings: $WARN)"
     return 0
   else
     say "Health Check Result: FAIL ❌  (failures: $FAIL, warnings: $WARN)"
-    h_info "Tip: start with watcher logs:"
-    echo "    journalctl -u grub-standalone-watch.service -n 80 --no-pager"
+    h_info "Tip: re-run the hooks install option if hooks are missing."
     return 1
   fi
 }

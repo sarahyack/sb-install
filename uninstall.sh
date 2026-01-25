@@ -14,7 +14,7 @@ show_intro() {
 
 Secure Boot Helper - Uninstall
 
-This script removes watchers/hooks and related additions created by install.sh.
+This script removes hooks/scripts and related additions created by install.sh.
 It will ask before each major step.
 
 TXT
@@ -119,15 +119,19 @@ restore_or_remove() {
   rm_file "$target"
 }
 
-uninstall_watchers_and_hooks() {
-  say "Stopping watcher service"
-  sudo systemctl disable --now grub-standalone-watch.path >/dev/null 2>&1 || true
-  sudo systemctl disable --now grub-standalone-watch.service >/dev/null 2>&1 || true
-  sudo systemctl reset-failed grub-standalone-watch.service grub-standalone-watch.path >/dev/null 2>&1 || true
+uninstall_hooks_and_scripts() {
+  say "Stopping any legacy watcher units (if present)"
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl disable --now grub-standalone-watch.path >/dev/null 2>&1 || true
+    sudo systemctl disable --now grub-standalone-watch.service >/dev/null 2>&1 || true
+    sudo systemctl reset-failed grub-standalone-watch.service grub-standalone-watch.path >/dev/null 2>&1 || true
+  fi
 
   rm_file /etc/systemd/system/grub-standalone-watch.service
   rm_file /etc/systemd/system/grub-standalone-watch.path
-  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
 
   rm_file /etc/pacman.d/hooks/95-kernel-sbsign.hook
   rm_file /etc/pacman.d/hooks/99-grub-standalone.hook
@@ -222,8 +226,8 @@ main() {
   mok_crt="${mok_crt:-/etc/secureboot/mok/MOK.crt}"
   mok_cer="${mok_cer:-/etc/secureboot/mok/MOK.cer}"
 
-  if confirm "Remove watcher service, pacman hooks, and installed scripts?" 0; then
-    uninstall_watchers_and_hooks
+  if confirm "Remove pacman hooks and installed scripts?" 0; then
+    uninstall_hooks_and_scripts
   fi
 
   if confirm "Remove /etc/secureboot/grub-standalone.conf and /var/lib/secureboot state dirs?" 0; then

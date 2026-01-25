@@ -35,7 +35,7 @@ It helps you:
 - set up a shim + MOK trust chain
 - sign kernels and GRUB EFI binaries
 - build a signed standalone GRUB EFI with embedded config/theme/splash
-- keep everything re-signed automatically after updates or edits
+- keep everything re-signed automatically after updates (manual refresh for edits)
 
 It includes an install script (`install.sh`) and a dedicated uninstall script (`uninstall.sh`).
 
@@ -47,7 +47,7 @@ This project builds a reliable trust chain:
 
 **Firmware → shim (Microsoft-signed) → GRUB (signed by your MOK) → kernel (signed by your MOK)**
 
-…and makes sure it stays healthy over time using pacman hooks and a file watcher.
+…and makes sure it stays healthy over time using pacman hooks and a manual refresh command.
 
 If you have ever wondered why a theme vanished, or why a kernel update suddenly refuses to boot under Secure Boot, this is the automation layer that keeps those problems from resurfacing.
 
@@ -59,7 +59,7 @@ At a high level, the workflow is:
 2. Create or reuse a Machine Owner Key (MOK).
 3. Sign kernels and GRUB using that MOK.
 4. Build a **standalone GRUB EFI** (embeds grub.cfg + theme + splash).
-5. Install update automation (hooks + watcher service).
+5. Install update automation (pacman hooks + manual refresh command).
 
 Why standalone GRUB? It embeds config + assets so GRUB does not depend on disk files at boot time, which is more reliable under Secure Boot.
 
@@ -132,20 +132,20 @@ Each option is safe to run individually if you understand the scope. You can rer
 4. **Create MOK + sign kernel/GRUB**
    - Creates a MOK, signs kernel(s), optionally signs an existing GRUB EFI, and copies `MOK.cer` to the ESP.
 
-5. **Install Post-Update hooks (watchers)**
-   - Installs pacman hooks + systemd path/service to auto rebuild/re-sign.
+5. **Install Post-Update hooks**
+   - Installs pacman hooks + manual refresh command.
 
 6. **Rebuild standalone GRUB + sign + copy fallback**
    - Builds and signs a standalone GRUB EFI with embedded assets.
 
 7. **Full typical sequence**
-   - Runs 3 → 4 → 6 in order, then prompts for watchers and optional snapshot support.
+   - Runs 3 → 4 → 6 in order, then prompts for hooks and optional snapshot support.
 
 8. **Optional: grub-btrfs snapshot support**
    - Installs grub-btrfs and optional snapshot tooling (Snapper/Timeshift).
 
 9. **Health check**
-   - Audits installed files, service status, and signing status.
+   - Audits installed files and signing status.
 
 </details>
 
@@ -188,15 +188,11 @@ Each option is safe to run individually if you understand the scope. You can rer
   - `/etc/secureboot/grub-standalone.conf`
 - Scripts:
   - `/usr/local/sbin/grub-standalone-rebuild.sh`
-  - `/usr/local/sbin/grub-standalone-watch.sh`
   - `/usr/local/sbin/secureboot-refresh`
   - `/usr/local/sbin/kernel-sbsign-all.sh`
 - Hooks:
   - `/etc/pacman.d/hooks/95-kernel-sbsign.hook`
   - `/etc/pacman.d/hooks/99-grub-standalone.hook`
-- Service:
-  - `/etc/systemd/system/grub-standalone-watch.service`
-  - `/etc/systemd/system/grub-standalone-watch.path`
 - Backups:
   - `/var/lib/secureboot/grub-standalone/backups/`
   - `/var/lib/secureboot/kernel-sbsign/backups/`
@@ -225,13 +221,10 @@ Backups are your safety net. If something goes sideways, these are what let you 
 
 ## Automatic Updates
 
-Two mechanisms keep the system current:
+One mechanism keeps the system current:
 
 1. **pacman hook**
    - Runs after package updates to rebuild + sign the standalone GRUB.
-
-2. **watcher service**
-   - Watches config/theme directories for manual edits and triggers rebuild.
 
 You can also run a manual refresh any time:
 
@@ -241,27 +234,27 @@ sudo secureboot-refresh
 
 This signs kernels (if needed) and rebuilds/re-signs the standalone GRUB EFI.
 
-If you prefer manual refresh only, disable the watcher and keep using `secureboot-refresh`:
-
-```bash
-sudo systemctl disable --now grub-standalone-watch.path
-sudo systemctl disable --now grub-standalone-watch.service
-```
-
 The rebuild script is safe to run repeatedly; it uses a lock file to avoid concurrent runs.
 
-If you are curious about what triggers rebuilds, check the hook files and the watcher service logs.
+If you are curious about what triggers rebuilds, check the hook files.
+
+### Migration note (removing old watcher artifacts)
+
+If you installed an older version that used the continuous watcher, remove it once:
+
+```bash
+sudo systemctl disable --now grub-standalone-watch.path grub-standalone-watch.service
+sudo rm -f /etc/systemd/system/grub-standalone-watch.path \
+  /etc/systemd/system/grub-standalone-watch.service \
+  /usr/local/sbin/grub-standalone-watch.sh
+sudo systemctl daemon-reload
+```
 
 ---
 
 ## Health Check and Verification
 
 The installer includes a health check (menu option 9). You can also manually verify:
-
-```bash
-systemctl is-enabled grub-standalone-watch.path
-systemctl status grub-standalone-watch.path
-```
 
 ```bash
 source /etc/secureboot/grub-standalone.conf
@@ -280,9 +273,6 @@ sudo sbverify --list "$ESP_MOUNT/EFI/$GRUB_ID/grubx64.efi"
 
 **“bad shim lock signature”**
 - The binary is not signed by the enrolled MOK. Rebuild + re-sign.
-
-**Watcher inactive**
-- `sudo systemctl daemon-reload` then `sudo systemctl enable --now grub-standalone-watch.path`
 
 **ESP not mounted**
 - Confirm `ESP_MOUNT` and `ESP_DEV` in `/etc/secureboot/grub-standalone.conf`.
@@ -330,7 +320,7 @@ chmod +x uninstall.sh
 
 It will prompt for each major removal step:
 
-- watcher service + hooks + scripts
+- pacman hooks + scripts
 - secureboot config/state dirs
 - MOK keys
 - ESP shim/MOK files
@@ -373,7 +363,7 @@ If you are unsure about a step, answer No and move on. You can rerun the uninsta
 - `install.sh` - main interactive installer
 - `uninstall.sh` - removal script
 - `lib/` - helper and health check functions
-- `grub-standalone/` - build scripts + service/hook templates
+- `grub-standalone/` - build scripts + hook templates
 - `kernel/` - kernel signing scripts + pacman hook template
 
 ---
@@ -390,12 +380,6 @@ lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
 findmnt -t vfat
 ```
 
-Watch service logs:
-
-```bash
-sudo journalctl -fu grub-standalone-watch.service
-```
-
 Rebuild standalone GRUB now:
 
 ```bash
@@ -406,6 +390,12 @@ Sign kernels now:
 
 ```bash
 sudo /usr/local/sbin/kernel-sbsign-all.sh
+```
+
+Manual refresh now:
+
+```bash
+sudo secureboot-refresh
 ```
 
 </details>
