@@ -11,6 +11,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 KERNEL_SIGN_SCRIPT_TEMPLATE="$SCRIPT_DIR/kernel/kernel-sbsign-all.sh"
 KERNEL_SIGN_HOOK_TEMPLATE="$SCRIPT_DIR/kernel/kernel-sbsign.hook"
 GRUB_HOOK_TEMPLATE="$SCRIPT_DIR/grub-standalone/grub-standalone.hook"
+SHIM_SYNC_SCRIPT_TEMPLATE="$SCRIPT_DIR/shim/shim-sync.sh"
+SHIM_SYNC_HOOK_TEMPLATE="$SCRIPT_DIR/shim/shim-sync.hook"
 REFRESH_SCRIPT_TEMPLATE="$SCRIPT_DIR/refresh.sh"
 STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/grub-standalone/build-grub-standalone.sh"
 ENV_FILE="$SCRIPT_DIR/lib/env.sh"
@@ -95,22 +97,12 @@ setup_shim_and_mokmanager() {
   say "Shim + MokManager setup on ESP: $esp"
   confirm "Install shim-signed + efibootmgr?" 0 && yay_install shim-signed efibootmgr
 
-  sudo mkdir -p "$esp/EFI/BOOT"
-  local shim_src mm_src
-  IFS='|' read -r shim_src mm_src < <(detect_shim_paths || true)
-
-  shim_src="${shim_src:-/usr/share/shim-signed/shimx64.efi}"
-  mm_src="${mm_src:-/usr/share/shim-signed/mmx64.efi}"
-
-  [[ -f "$shim_src" ]] || die "shim not found: $shim_src (is shim-signed installed?)"
-  [[ -f "$mm_src" ]] || die "MokManager not found: $mm_src (is shim-signed installed?)"
-
-  if confirm "Copy shim to $esp/EFI/BOOT/BOOTx64.EFI and MokManager to $esp/EFI/BOOT/ ?" 1; then
-    backup_file "$esp/EFI/BOOT/BOOTx64.EFI" "$esp/EFI/BOOT/backup"
-    backup_file "$esp/EFI/BOOT/mmx64.efi" "$esp/EFI/BOOT/backup"
-    sudo cp -f "$shim_src" "$esp/EFI/BOOT/BOOTx64.EFI"
-    sudo cp -f "$mm_src" "$esp/EFI/BOOT/mmx64.efi"
-    say "Copied shim + MokManager."
+  [[ -f "$SHIM_SYNC_SCRIPT_TEMPLATE" ]] || die "Missing template: $SHIM_SYNC_SCRIPT_TEMPLATE"
+  if confirm "Copy/refresh shim to $esp/EFI/BOOT/BOOTx64.EFI and MokManager to $esp/EFI/BOOT/ ?" 1; then
+    sudo env \
+      SB_INSTALL_RUN_ID="$SB_INSTALL_RUN_ID" \
+      SB_BACKUP_KEEP="${SB_BACKUP_KEEP:-5}" \
+      bash "$SHIM_SYNC_SCRIPT_TEMPLATE" --esp "$esp"
   fi
 
   if confirm "Create NVRAM boot entry for shim (label: Shim)?" 1; then
@@ -247,13 +239,15 @@ sign_kernel_and_grub_with_mok() {
 }
 
 install_hooks() {
-  confirm "Install post-update hooks for re-signing & rebuilding (kernel + grubcfg)?" 0 \
+  confirm "Install post-update hooks for shim sync, re-signing & rebuilding (kernel + grubcfg)?" 0 \
       || { say "Skipping hook install."; return 0; }
 
   [[ -f "$KERNEL_SIGN_SCRIPT_TEMPLATE" ]] || die "Missing template: $KERNEL_SIGN_SCRIPT_TEMPLATE"
   [[ -f "$KERNEL_SIGN_HOOK_TEMPLATE"   ]] || die "Missing template: $KERNEL_SIGN_HOOK_TEMPLATE"
   [[ -f "$STANDALONE_GRUB_BUILDER"     ]] || die "Missing template: $STANDALONE_GRUB_BUILDER"
   [[ -f "$GRUB_HOOK_TEMPLATE"          ]] || die "Missing template: $GRUB_HOOK_TEMPLATE"
+  [[ -f "$SHIM_SYNC_SCRIPT_TEMPLATE"    ]] || die "Missing template: $SHIM_SYNC_SCRIPT_TEMPLATE"
+  [[ -f "$SHIM_SYNC_HOOK_TEMPLATE"      ]] || die "Missing template: $SHIM_SYNC_HOOK_TEMPLATE"
   [[ -f "$REFRESH_SCRIPT_TEMPLATE"     ]] || die "Missing template: $REFRESH_SCRIPT_TEMPLATE"
 
   # Install kernel signing script + pacman hook (PostTransaction)
@@ -264,6 +258,12 @@ install_hooks() {
   say "Installing pacman hook for kernel signing to /etc/pacman.d/hooks/95-kernel-sbsign.hook"
   [[ -f "$KERNEL_SIGN_HOOK_TEMPLATE" ]] || die "Missing template: $KERNEL_SIGN_HOOK_TEMPLATE"
   sudo install -D -m 0644 "$KERNEL_SIGN_HOOK_TEMPLATE" /etc/pacman.d/hooks/95-kernel-sbsign.hook
+
+  say "Installing shim sync helper to /usr/local/sbin/secureboot-shim-sync"
+  sudo install -D -m 0755 "$SHIM_SYNC_SCRIPT_TEMPLATE" /usr/local/sbin/secureboot-shim-sync
+
+  say "Installing pacman hook for shim synchronization to /etc/pacman.d/hooks/98-shim-sync.hook"
+  sudo install -D -m 0644 "$SHIM_SYNC_HOOK_TEMPLATE" /etc/pacman.d/hooks/98-shim-sync.hook
 
   say "Installing builder to /usr/local/sbin/grub-standalone-rebuild.sh"
   sudo install -D -m 0755 "$STANDALONE_GRUB_BUILDER" /usr/local/sbin/grub-standalone-rebuild.sh
@@ -457,7 +457,7 @@ main() {
   echo "  2) sbctl flow (keys/enroll/verify/sign)"
   echo "  3) Shim + MokManager copy + NVRAM entry"
   echo "  4) Create MOK + sign kernel/GRUB + copy MOK.cer to ESP"
-  echo "  5) Install Post-Update Hooks for Future Update Re-signing & Rebuilding"
+  echo "  5) Install Post-Update Hooks for Future Shim Sync, Re-signing & Rebuilding"
   echo "  6) Rebuild GRUB Standalone with GRUB_MODULES + sbat.csv + sign/copy fallback"
   echo "  7) Run a typical full sequence (3 -> 4 -> 5 -> 6), with prompts"
   echo "  8) Optional: grub-btrfs snapshot boot menu support (Snapper/Timeshift)"

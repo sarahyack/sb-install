@@ -27,7 +27,7 @@ checkhealth() {
   local -a cmds=(
     grub-mkstandalone grub-mkconfig
     sbsign sbverify
-    findmnt mount awk sed grep
+    findmnt mount flock awk sed grep
   )
   for c in "${cmds[@]}"; do
     if have_cmd "$c"; then
@@ -35,7 +35,7 @@ checkhealth() {
     else
       # some are truly required for correct operation
       case "$c" in
-        grub-mkstandalone|grub-mkconfig|sbsign|sbverify)
+        grub-mkstandalone|grub-mkconfig|sbsign|sbverify|flock)
           h_fail "Missing required command: $c"
           ;;
         *)
@@ -48,8 +48,10 @@ checkhealth() {
   # --- 3) Installed hooks + scripts ---
   local -a must_files=(
     "/etc/pacman.d/hooks/95-kernel-sbsign.hook"
+    "/etc/pacman.d/hooks/98-shim-sync.hook"
     "/etc/pacman.d/hooks/99-grub-standalone.hook"
     "/usr/local/sbin/kernel-sbsign-all.sh"
+    "/usr/local/sbin/secureboot-shim-sync"
     "/usr/local/sbin/grub-standalone-rebuild.sh"
     "/usr/local/sbin/secureboot-refresh"
   )
@@ -70,6 +72,13 @@ checkhealth() {
       h_fail "kernel hook Exec is not /usr/local/sbin/kernel-sbsign-all.sh"
     fi
   fi
+  if sudo test -r /etc/pacman.d/hooks/98-shim-sync.hook; then
+    if sudo grep -qE '^Exec\s*=\s*/usr/local/sbin/secureboot-shim-sync\s*$' /etc/pacman.d/hooks/98-shim-sync.hook; then
+      h_ok "shim sync hook Exec looks correct"
+    else
+      h_fail "shim sync hook Exec is not /usr/local/sbin/secureboot-shim-sync"
+    fi
+  fi
   if sudo test -r /etc/pacman.d/hooks/99-grub-standalone.hook; then
     if sudo grep -qE '^Exec\s*=\s*/usr/local/sbin/grub-standalone-rebuild\.sh\s*$' /etc/pacman.d/hooks/99-grub-standalone.hook; then
       h_ok "grub hook Exec looks correct"
@@ -79,7 +88,7 @@ checkhealth() {
   fi
 
   # --- 4) Read config vars (only if config exists) ---
-  local ESP_MOUNT="" GRUB_ID="" MOK_KEY="" MOK_CRT=""
+  local ESP_MOUNT="" GRUB_ID="" MOK_KEY="" MOK_CRT="" MOK_CER=""
   if sudo test -r "$CONF"; then
     ESP_MOUNT="$(conf_get_var_as_root "$CONF" ESP_MOUNT)"
     GRUB_ID="$(conf_get_var_as_root "$CONF" GRUB_ID)"
@@ -91,7 +100,7 @@ checkhealth() {
     [[ -n "$GRUB_ID" ]]   && h_ok "GRUB_ID=$GRUB_ID"     || h_fail "GRUB_ID is empty in $CONF"
     [[ -n "$MOK_KEY" ]]   && h_ok "MOK_KEY=$MOK_KEY"     || h_fail "MOK_KEY is empty in $CONF"
     [[ -n "$MOK_CRT" ]]   && h_ok "MOK_CRT=$MOK_CRT"     || h_fail "MOK_CRT is empty in $CONF"
-    [[ -n "$MOK_CER" ]]   && h_ok "MOK_CRT=$MOK_CER"     || h_fail "MOK_CER is empty in $CONF"
+    [[ -n "$MOK_CER" ]]   && h_ok "MOK_CER=$MOK_CER"     || h_fail "MOK_CER is empty in $CONF"
   fi
 
   # --- 5) ESP sanity ---
@@ -108,7 +117,35 @@ checkhealth() {
     fi
   fi
 
-  # --- 6) Verify signatures (kernel + GRUB EFI) ---
+  # --- 6) Shim + MokManager ESP state ---
+  h_section "Shim + MokManager"
+  local SHIM_SYNCER="/usr/local/sbin/secureboot-shim-sync"
+  if [[ -n "$ESP_MOUNT" ]]; then
+    if sudo test -x "$SHIM_SYNCER"; then
+      local shim_out=""
+      local shim_check_failed=0
+      if shim_out="$(sudo "$SHIM_SYNCER" --check --esp "$ESP_MOUNT" 2>&1)"; then
+        h_ok "shim/MokManager ESP copies match installed shim-signed files"
+      else
+        h_fail "shim/MokManager ESP copies do not match installed shim-signed files"
+        shim_check_failed=1
+      fi
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && h_info "$line"
+      done <<< "$shim_out"
+      if (( shim_check_failed != 0 )); then
+        h_info "Run: sudo secureboot-refresh"
+        h_info "If installed shim sources are missing, install shim-signed first."
+      fi
+    else
+      h_fail "shim sync helper missing or not executable: $SHIM_SYNCER"
+      h_info "Run the hooks install option to install /usr/local/sbin/secureboot-shim-sync"
+    fi
+  else
+    h_fail "Cannot check shim/MokManager ESP copies because ESP_MOUNT is unavailable"
+  fi
+
+  # --- 7) Verify signatures (kernel + GRUB EFI) ---
   if [[ -n "$MOK_CRT" ]]; then
     if sudo test -r "$MOK_CRT"; then
       h_ok "MOK cert readable: $MOK_CRT"

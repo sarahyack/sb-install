@@ -381,9 +381,12 @@ mk_mok_keys() {
 
 detect_shim_paths() {
   local shim mm
-  need_cmd yay
-  shim="$(yay -Ql shim-signed 2>/dev/null | awk '{print $2}' | grep -E '/shimx64\.efi$' | head -n1 || true)"
-  mm="$(yay -Ql shim-signed 2>/dev/null | awk '{print $2}' | grep -E '/mmx64\.efi$' | head -n1 || true)"
+  if command -v pacman >/dev/null 2>&1; then
+    shim="$(pacman -Ql shim-signed 2>/dev/null | awk '{print $2}' | grep -E '/shimx64\.efi$' | head -n1 || true)"
+    mm="$(pacman -Ql shim-signed 2>/dev/null | awk '{print $2}' | grep -E '/mmx64\.efi$' | head -n1 || true)"
+  fi
+  shim="${shim:-/usr/share/shim-signed/shimx64.efi}"
+  mm="${mm:-/usr/share/shim-signed/mmx64.efi}"
   [[ -f "$shim" && -f "$mm" ]] || return 1
   printf '%s|%s\n' "$shim" "$mm"
 }

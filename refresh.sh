@@ -21,7 +21,20 @@ if [[ -z "${MOK_CER:-}" && -n "${MOK_CRT:-}" ]]; then
 fi
 
 KERNEL_SIGNER="/usr/local/sbin/kernel-sbsign-all.sh"
+SHIM_SYNCER="/usr/local/sbin/secureboot-shim-sync"
 GRUB_REBUILDER="/usr/local/sbin/grub-standalone-rebuild.sh"
+REFRESH_RC=0
+
+if [[ -x "$SHIM_SYNCER" ]]; then
+  log "Synchronizing shim and MokManager on the ESP..."
+  if ! "$SHIM_SYNCER"; then
+    warn "Shim/MokManager synchronization failed."
+    REFRESH_RC=1
+  fi
+else
+  warn "Shim sync helper missing: $SHIM_SYNCER"
+  REFRESH_RC=1
+fi
 
 if [[ -x "$KERNEL_SIGNER" ]]; then
   log "Signing kernels (if needed)..."
@@ -69,4 +82,9 @@ if command -v mokutil >/dev/null 2>&1 && [[ -r "${MOK_CER:-}" ]]; then
     || warn "MOK test-key failed"
 fi
 
-log "Done."
+if [[ "$REFRESH_RC" -eq 0 ]]; then
+  log "Done."
+else
+  warn "Done with failures."
+fi
+exit "$REFRESH_RC"

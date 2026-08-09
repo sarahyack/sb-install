@@ -134,9 +134,11 @@ uninstall_hooks_and_scripts() {
   fi
 
   rm_file /etc/pacman.d/hooks/95-kernel-sbsign.hook
+  rm_file /etc/pacman.d/hooks/98-shim-sync.hook
   rm_file /etc/pacman.d/hooks/99-grub-standalone.hook
 
   rm_file /usr/local/sbin/kernel-sbsign-all.sh
+  rm_file /usr/local/sbin/secureboot-shim-sync
   rm_file /usr/local/sbin/grub-standalone-rebuild.sh
   rm_file /usr/local/sbin/grub-standalone-watch.sh
   rm_file /usr/local/sbin/secureboot-refresh
@@ -173,7 +175,7 @@ uninstall_esp_shim_and_mok() {
     return 0
   fi
 
-  restore_or_remove "$boot_dir/BOOTX64.EFI" "$boot_dir/backup"
+  restore_or_remove "$boot_dir/BOOTx64.EFI" "$boot_dir/backup"
   restore_or_remove "$boot_dir/mmx64.efi" "$boot_dir/backup"
 
   rm_file "$esp/MOK.cer"

@@ -1,0 +1,10 @@
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = shim-signed
+
+[Action]
+Description = Synchronizing shim and MokManager on the ESP (Secure Boot)
+When = PostTransaction
+Exec = /usr/local/sbin/secureboot-shim-sync
