@@ -27,7 +27,7 @@ checkhealth() {
   local -a cmds=(
     grub-mkstandalone grub-mkconfig
     sbsign sbverify
-    findmnt mount awk sed grep
+    findmnt mount flock awk sed grep
   )
   for c in "${cmds[@]}"; do
     if have_cmd "$c"; then

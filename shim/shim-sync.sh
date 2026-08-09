@@ -3,6 +3,7 @@ set -euo pipefail
 
 LOG_PREFIX="${SB_SHIM_SYNC_LOG_PREFIX:-secureboot-shim-sync}"
 CONF="${SB_SHIM_SYNC_CONF:-/etc/secureboot/grub-standalone.conf}"
+LOCK_PATH="${SB_SHIM_SYNC_LOCK:-/run/secureboot-shim-sync.lock}"
 BACKUP_KEEP="${SB_BACKUP_KEEP:-5}"
 RUN_ID="${SB_INSTALL_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
 
@@ -103,7 +104,30 @@ load_esp_from_config() {
     warn "ESP_MOUNT is empty in $CONF"
     return 1
   fi
-  printf '%s\n' "$ESP_MOUNT"
+}
+
+acquire_sync_lock() {
+  command -v flock >/dev/null 2>&1 || {
+    warn "Missing required command for synchronization lock: flock"
+    return 1
+  }
+
+  local lock_dir
+  lock_dir="$(dirname -- "$LOCK_PATH")"
+  if ! mkdir -p "$lock_dir"; then
+    warn "Could not create lock directory: $lock_dir"
+    return 1
+  fi
+
+  exec 9>"$LOCK_PATH" || {
+    warn "Could not open lock file: $LOCK_PATH"
+    return 1
+  }
+
+  if ! flock -n 9; then
+    warn "Another shim synchronization is already running; exiting."
+    return 2
+  fi
 }
 
 ensure_configured_esp_mounted() {
@@ -178,37 +202,103 @@ prune_backups() {
 backup_esp_file() {
   local path="$1"
   local backup_dir="$2"
+  local outvar="$3"
   local base
   base="$(basename -- "$path")"
+
+  printf -v "$outvar" '%s' ""
 
   if [[ ! -e "$path" ]]; then
     return 0
   fi
 
-  local ts backup latest meta
+  local ts backup latest meta latest_tmp latest_meta_tmp
   ts="$(date -u +%Y%m%d-%H%M%S)"
   backup="$backup_dir/${base}.sb-install.${ts}.bak"
   latest="$backup_dir/${base}.bak"
   meta="${backup}.meta"
+  latest_tmp="$backup_dir/.${base}.bak.$$"
+  latest_meta_tmp="$backup_dir/.${base}.bak.meta.$$"
 
-  mkdir -p "$backup_dir"
-  cp -f "$path" "$backup"
-  cp -f "$path" "$latest"
-  cat > "$meta" <<EOF
+  cleanup_failed_backup() {
+    rm -f "$backup" "$meta" "$latest_tmp" "$latest_meta_tmp" 2>/dev/null || true
+  }
+
+  if ! mkdir -p "$backup_dir"; then
+    warn "Could not create backup directory: $backup_dir"
+    return 1
+  fi
+
+  if ! cp -f "$path" "$backup"; then
+    warn "Could not create timestamped backup: $backup"
+    cleanup_failed_backup
+    return 1
+  fi
+  if [[ ! -f "$backup" ]] || ! cmp -s "$path" "$backup"; then
+    warn "Timestamped backup verification failed: $backup"
+    cleanup_failed_backup
+    return 1
+  fi
+
+  if ! {
+    cat > "$meta" <<EOF
 created_by=sb-install
 source_path=$path
 backup_time=$ts
 run_id=$RUN_ID
 EOF
-  cat > "${latest}.meta" <<EOF
+  }; then
+    warn "Could not write backup metadata: $meta"
+    cleanup_failed_backup
+    return 1
+  fi
+  if [[ ! -f "$meta" ]]; then
+    warn "Backup metadata was not created: $meta"
+    cleanup_failed_backup
+    return 1
+  fi
+
+  if ! cp -f "$path" "$latest_tmp"; then
+    warn "Could not create latest-backup temporary copy: $latest_tmp"
+    cleanup_failed_backup
+    return 1
+  fi
+  if [[ ! -f "$latest_tmp" ]] || ! cmp -s "$path" "$latest_tmp"; then
+    warn "Latest-backup temporary copy verification failed: $latest_tmp"
+    cleanup_failed_backup
+    return 1
+  fi
+
+  if ! {
+    cat > "$latest_meta_tmp" <<EOF
 created_by=sb-install
 source_path=$path
 backup_time=$ts
 run_id=$RUN_ID
 EOF
-  prune_backups "$backup_dir" "$base" "$BACKUP_KEEP"
+  }; then
+    warn "Could not write latest-backup metadata: $latest_meta_tmp"
+    cleanup_failed_backup
+    return 1
+  fi
+  if [[ ! -f "$latest_meta_tmp" ]]; then
+    warn "Latest-backup metadata was not created: $latest_meta_tmp"
+    cleanup_failed_backup
+    return 1
+  fi
 
-  printf '%s\n' "$backup"
+  if ! mv -f "$latest_tmp" "$latest"; then
+    warn "Could not install latest-backup copy: $latest"
+    cleanup_failed_backup
+    return 1
+  fi
+  if ! mv -f "$latest_meta_tmp" "${latest}.meta"; then
+    warn "Could not install latest-backup metadata: ${latest}.meta"
+    cleanup_failed_backup
+    return 1
+  fi
+
+  printf -v "$outvar" '%s' "$backup"
 }
 
 restore_changed_targets() {
@@ -226,6 +316,16 @@ restore_changed_targets() {
       warn "Removing incomplete new file: $target"
       rm -f "$target" || warn "Could not remove incomplete file: $target"
     fi
+  done
+}
+
+prune_completed_backups() {
+  local backup_dir="$1"
+  shift
+
+  local base
+  for base in "$@"; do
+    prune_backups "$backup_dir" "$base" "$BACKUP_KEEP"
   done
 }
 
@@ -286,10 +386,11 @@ sync_shim_to_esp() {
   fi
 
   local -a changed=()
+  local -a prune_after_success=()
   local shim_backup="" mm_backup=""
 
   if (( shim_current == 0 )); then
-    shim_backup="$(backup_esp_file "$shim_dst" "$backup_dir")" || {
+    backup_esp_file "$shim_dst" "$backup_dir" shim_backup || {
       rm -rf "$tmp_dir" || true
       return 1
     }
@@ -301,10 +402,11 @@ sync_shim_to_esp() {
       return 1
     fi
     changed+=("$shim_dst" "$shim_backup")
+    [[ -n "$shim_backup" ]] && prune_after_success+=("$(basename -- "$shim_dst")")
   fi
 
   if (( mm_current == 0 )); then
-    mm_backup="$(backup_esp_file "$mm_dst" "$backup_dir")" || {
+    backup_esp_file "$mm_dst" "$backup_dir" mm_backup || {
       rm -rf "$tmp_dir" || true
       restore_changed_targets "${changed[@]}"
       return 1
@@ -318,6 +420,7 @@ sync_shim_to_esp() {
       return 1
     fi
     changed+=("$mm_dst" "$mm_backup")
+    [[ -n "$mm_backup" ]] && prune_after_success+=("$(basename -- "$mm_dst")")
   fi
 
   rm -rf "$tmp_dir" || true
@@ -337,6 +440,7 @@ sync_shim_to_esp() {
     return 1
   fi
 
+  prune_completed_backups "$backup_dir" "${prune_after_success[@]}"
   log "Verified shim and MokManager ESP copies match installed sources."
 }
 
@@ -423,7 +527,8 @@ main() {
   fi
 
   if [[ -z "$esp" ]]; then
-    esp="$(load_esp_from_config)" || return 1
+    load_esp_from_config || return 1
+    esp="$ESP_MOUNT"
   fi
 
   if (( esp_explicit == 0 )); then
@@ -432,6 +537,14 @@ main() {
 
   case "$mode" in
     sync)
+      acquire_sync_lock
+      local lock_rc
+      lock_rc=$?
+      if (( lock_rc == 2 )); then
+        return 0
+      elif (( lock_rc != 0 )); then
+        return "$lock_rc"
+      fi
       sync_shim_to_esp "$esp" "$shim_src" "$mm_src"
       ;;
     check)
