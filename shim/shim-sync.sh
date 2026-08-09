@@ -4,6 +4,7 @@ set -euo pipefail
 LOG_PREFIX="${SB_SHIM_SYNC_LOG_PREFIX:-secureboot-shim-sync}"
 CONF="${SB_SHIM_SYNC_CONF:-/etc/secureboot/grub-standalone.conf}"
 LOCK_PATH="${SB_SHIM_SYNC_LOCK:-/run/secureboot-shim-sync.lock}"
+LOCK_TIMEOUT="${SB_SHIM_SYNC_LOCK_TIMEOUT:-60}"
 BACKUP_KEEP="${SB_BACKUP_KEEP:-5}"
 RUN_ID="${SB_INSTALL_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
 
@@ -124,9 +125,10 @@ acquire_sync_lock() {
     return 1
   }
 
-  if ! flock -n 9; then
-    warn "Another shim synchronization is already running; exiting."
-    return 2
+  log "Waiting for synchronization lock: $LOCK_PATH"
+  if ! flock -w "$LOCK_TIMEOUT" 9; then
+    warn "Timed out after ${LOCK_TIMEOUT}s waiting for synchronization lock: $LOCK_PATH"
+    return 1
   fi
 }
 
@@ -518,12 +520,21 @@ main() {
   done
 
   if [[ -z "$shim_src" || -z "$mm_src" ]]; then
-    IFS='|' read -r shim_src mm_src < <(detect_shim_sources)
+    local detected_shim detected_mm
+    IFS='|' read -r detected_shim detected_mm < <(detect_shim_sources)
+    shim_src="${shim_src:-$detected_shim}"
+    mm_src="${mm_src:-$detected_mm}"
   fi
 
   if [[ "$mode" == "print-sources" ]]; then
     printf '%s|%s\n' "$shim_src" "$mm_src"
     return 0
+  fi
+
+  if [[ "$mode" == "sync" ]]; then
+    if ! acquire_sync_lock; then
+      return 1
+    fi
   fi
 
   if [[ -z "$esp" ]]; then
@@ -537,14 +548,6 @@ main() {
 
   case "$mode" in
     sync)
-      acquire_sync_lock
-      local lock_rc
-      lock_rc=$?
-      if (( lock_rc == 2 )); then
-        return 0
-      elif (( lock_rc != 0 )); then
-        return "$lock_rc"
-      fi
       sync_shim_to_esp "$esp" "$shim_src" "$mm_src"
       ;;
     check)

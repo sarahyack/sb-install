@@ -150,10 +150,12 @@ run_sync() {
   local src_dir="$2"
   local backup_keep="${SB_BACKUP_KEEP:-5}"
   local lock_path="${SB_SHIM_SYNC_LOCK:-$esp/.shim-sync.lock}"
+  local lock_timeout="${SB_SHIM_SYNC_LOCK_TIMEOUT:-60}"
   shift 2
   SB_INSTALL_RUN_ID=test-run \
     SB_BACKUP_KEEP="$backup_keep" \
     SB_SHIM_SYNC_LOCK="$lock_path" \
+    SB_SHIM_SYNC_LOCK_TIMEOUT="$lock_timeout" \
     bash "$HELPER" --esp "$esp" \
       --shim-src "$src_dir/shimx64.efi" \
       --mm-src "$src_dir/mmx64.efi" "$@"
@@ -172,11 +174,13 @@ run_sync_from_config() {
   local conf="$1"
   local src_dir="$2"
   local lock_path="${SB_SHIM_SYNC_LOCK:-$(dirname -- "$conf")/.shim-sync.lock}"
+  local lock_timeout="${SB_SHIM_SYNC_LOCK_TIMEOUT:-60}"
   shift 2
   SB_INSTALL_RUN_ID=test-run \
     SB_BACKUP_KEEP="${SB_BACKUP_KEEP:-5}" \
     SB_SHIM_SYNC_CONF="$conf" \
     SB_SHIM_SYNC_LOCK="$lock_path" \
+    SB_SHIM_SYNC_LOCK_TIMEOUT="$lock_timeout" \
     bash "$HELPER" \
       --shim-src "$src_dir/shimx64.efi" \
       --mm-src "$src_dir/mmx64.efi" "$@"
@@ -502,6 +506,108 @@ case_check_mode_reports_without_modifying() {
   assert_no_backup "$boot/backup" "mmx64.efi"
 }
 
+case_lock_waits_then_syncs_current_files() {
+  local tmp="$1"
+  local esp="$tmp/esp"
+  local src="$tmp/src"
+  local boot="$esp/EFI/BOOT"
+  local lock="$tmp/shim-sync.lock"
+  local ready="$tmp/holder-ready"
+  local out="$tmp/out"
+  local holder_pid
+
+  write_sources "$src" "shim-new" "mm-new"
+  mkdir -p "$boot"
+  printf '%s' "shim-old" > "$boot/BOOTx64.EFI"
+  printf '%s' "mm-old" > "$boot/mmx64.efi"
+
+  (
+    exec 8>"$lock"
+    flock 8
+    : > "$ready"
+    sleep 1
+  ) &
+  holder_pid=$!
+  for _ in {1..50}; do
+    [[ -e "$ready" ]] && break
+    sleep 0.05
+  done
+  [[ -e "$ready" ]] || fail "lock holder did not start"
+
+  SB_SHIM_SYNC_LOCK="$lock" SB_SHIM_SYNC_LOCK_TIMEOUT=5 run_sync "$esp" "$src" >"$out"
+  wait "$holder_pid"
+
+  assert_file_equals "$src/shimx64.efi" "$boot/BOOTx64.EFI"
+  assert_file_equals "$src/mmx64.efi" "$boot/mmx64.efi"
+  grep -q 'Waiting for synchronization lock' "$out" || fail "lock wait was not logged"
+  grep -q 'Verified shim and MokManager' "$out" || fail "sync did not report verification after waiting"
+}
+
+case_lock_timeout_fails_without_modifying() {
+  local tmp="$1"
+  local esp="$tmp/esp"
+  local src="$tmp/src"
+  local boot="$esp/EFI/BOOT"
+  local lock="$tmp/shim-sync.lock"
+  local ready="$tmp/holder-ready"
+  local out="$tmp/out"
+  local holder_pid
+
+  write_sources "$src" "shim-new" "mm-new"
+  mkdir -p "$boot"
+  printf '%s' "shim-old" > "$boot/BOOTx64.EFI"
+  printf '%s' "mm-old" > "$boot/mmx64.efi"
+
+  (
+    exec 8>"$lock"
+    flock 8
+    : > "$ready"
+    sleep 2
+  ) &
+  holder_pid=$!
+  for _ in {1..50}; do
+    [[ -e "$ready" ]] && break
+    sleep 0.05
+  done
+  [[ -e "$ready" ]] || fail "lock holder did not start"
+
+  if SB_SHIM_SYNC_LOCK="$lock" SB_SHIM_SYNC_LOCK_TIMEOUT=1 run_sync "$esp" "$src" >"$out" 2>&1; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    fail "sync succeeded despite lock timeout"
+  fi
+  wait "$holder_pid"
+
+  assert_text_equals "shim-old" "$boot/BOOTx64.EFI"
+  assert_text_equals "mm-old" "$boot/mmx64.efi"
+  grep -q 'Timed out' "$out" || fail "lock timeout was not reported"
+  if grep -Eq 'Verified shim and MokManager|already current' "$out"; then
+    fail "timeout output falsely reported success"
+  fi
+}
+
+case_print_sources_preserves_explicit_shim() {
+  local tmp="$1"
+  local custom="$tmp/custom-shim.efi"
+  local out shim mm
+
+  out="$(bash "$HELPER" --print-sources --shim-src "$custom")"
+  IFS='|' read -r shim mm <<< "$out"
+  [[ "$shim" == "$custom" ]] || fail "explicit shim source was not preserved"
+  [[ -n "$mm" ]] || fail "missing detected MokManager source"
+}
+
+case_print_sources_preserves_explicit_mokmanager() {
+  local tmp="$1"
+  local custom="$tmp/custom-mm.efi"
+  local out shim mm
+
+  out="$(bash "$HELPER" --print-sources --mm-src "$custom")"
+  IFS='|' read -r shim mm <<< "$out"
+  [[ -n "$shim" ]] || fail "missing detected shim source"
+  [[ "$mm" == "$custom" ]] || fail "explicit MokManager source was not preserved"
+}
+
 run_case "already synchronized" case_already_synchronized
 run_case "outdated ESP" case_outdated_esp
 run_case "fresh destination" case_fresh_destination
@@ -517,3 +623,7 @@ run_case "SB_BACKUP_KEEP=0 rollback" case_keep_zero_does_not_break_rollback
 run_case "rollback after first destination changes" case_failure_after_first_destination_changes
 run_case "config ESP_DEV mount" case_config_load_and_mount_uses_esp_dev
 run_case "check mode does not modify" case_check_mode_reports_without_modifying
+run_case "lock waits then syncs" case_lock_waits_then_syncs_current_files
+run_case "lock timeout fails safely" case_lock_timeout_fails_without_modifying
+run_case "print-sources preserves shim override" case_print_sources_preserves_explicit_shim
+run_case "print-sources preserves MokManager override" case_print_sources_preserves_explicit_mokmanager

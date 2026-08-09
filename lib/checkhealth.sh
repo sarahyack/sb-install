@@ -35,7 +35,7 @@ checkhealth() {
     else
       # some are truly required for correct operation
       case "$c" in
-        grub-mkstandalone|grub-mkconfig|sbsign|sbverify)
+        grub-mkstandalone|grub-mkconfig|sbsign|sbverify|flock)
           h_fail "Missing required command: $c"
           ;;
         *)
