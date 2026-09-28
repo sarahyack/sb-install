@@ -13,7 +13,7 @@ assert_same() { cmp -s "$1" "$2" || fail "Files differ: $1 $2"; }
 
 fixture() {
   T="$1"
-  export TEST_ROOT="$T" TEST_MODE="" MOK_STATUS=0 MOK_TEXT='MOK is already enrolled'
+  export TEST_ROOT="$T" TEST_MODE="" MOK_STATUS=0 MOK_TEXT="$T/etc/secureboot/mok/MOK.cer is already enrolled" MOK_STDERR=""
   mkdir -p "$T/repo" "$T/bin" "$T/run" "$T/etc/secureboot/mok" "$T/boot" \
     "$T/usr/lib/grub/x86_64-efi" "$T/usr/share/grub" "$T/usr/local/sbin" "$T/usr/local/lib/sb-install" \
     "$T/esp/EFI/GRUB" "$T/esp/EFI/BOOT"
@@ -32,7 +32,7 @@ fixture() {
       -e "s|/run/grub|$T/run/grub|g" \
       -e "s|/boot/vmlinuz-|$T/boot/vmlinuz-|g" "$file"
   done < <(find "$T/repo" -name '*.sh' -print0)
-  cp "$T/repo/lib/grub-compat.sh" "$T/usr/local/lib/sb-install/"
+  cp "$T/repo/lib/grub-compat.sh" "$T/repo/lib/mok-enrollment.sh" "$T/usr/local/lib/sb-install/"
   cp "$T/repo/grub-standalone/build-grub-standalone.sh" "$T/usr/local/sbin/grub-standalone-rebuild.sh"
   cp "$T/repo/kernel/kernel-sbsign-all.sh" "$T/usr/local/sbin/"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$T/usr/local/sbin/secureboot-shim-sync"
@@ -146,7 +146,9 @@ case "$name" in
     ;;
   mokutil)
     if [[ "$1" == --sb-state ]]; then echo 'SecureBoot enabled'; exit 0; fi
-    [[ "$1" == --test-key ]] || exit 97
+    [[ "$1" == --test-key && "$2" == "$TEST_ROOT/etc/secureboot/mok/MOK.cer" ]] || exit 97
+    [[ "$LC_ALL" == C ]] || { echo "Incorrect query locale" >&2; exit 98; }
+    if [[ -n "$MOK_STDERR" ]]; then printf '%s\n' "$MOK_STDERR" >&2; fi
     printf '%s\n' "$MOK_TEXT"
     exit "$MOK_STATUS"
     ;;
@@ -282,7 +284,7 @@ case_refresh() {
     mount-fail) TEST_MODE=mount-fail ;;
     key-missing) rm "$T/etc/secureboot/mok/MOK.key" ;;
     config-missing) rm "$T/etc/secureboot/grub-standalone.conf" ;;
-    not-enrolled) MOK_TEXT='MOK is not enrolled'; MOK_STATUS=1 ;;
+    not-enrolled) MOK_TEXT="$T/etc/secureboot/mok/MOK.cer is not enrolled"; MOK_STATUS=1 ;;
     inconclusive) MOK_TEXT='Cannot access EFI variables'; MOK_STATUS=2 ;;
   esac
   if bash "$T/repo/refresh.sh" > "$T/out" 2>&1; then
@@ -300,18 +302,97 @@ case_mok() {
   h_fail() { echo "FAIL $*"; }
   h_warn() { echo "WARN $*"; }
   h_info() { echo "INFO $*"; }
-  MOK_STATUS="$1" MOK_TEXT="$2"
+  MOK_STATUS="$1" MOK_TEXT="${2//%CERT%/$T/etc/secureboot/mok/MOK.cer}"
   check_mok_enrollment "$T/etc/secureboot/mok/MOK.cer" > "$T/out"
   assert_has "$T/out" "$3"
   assert_has "$T/out" "status $MOK_STATUS"
   if [[ "$3" != 'OK MOK is enrolled' ]]; then assert_lacks "$T/out" 'OK MOK is enrolled'; fi
+}
+case_mok_callers() {
+  local query_status="$1" response="$2" expected="$3" query_cert="$T/etc/secureboot/mok/MOK.cer"
+  refresh_fixture
+  MOK_STATUS="$query_status" MOK_TEXT="${response//%CERT%/$query_cert}"
+  MOK_STDERR="${4:-}"
+  # Even a config-selected locale must not affect the enrollment query.
+  printf '\nLC_ALL=POSIX\n' >> "$T/etc/secureboot/grub-standalone.conf"
+  (
+    # shellcheck source=lib/checkhealth.sh
+    source "$T/repo/lib/checkhealth.sh"
+    h_ok() { echo "OK $*"; }
+    h_fail() { echo "FAIL $*"; }
+    h_warn() { echo "WARN $*"; }
+    h_info() { echo "INFO $*"; }
+    check_mok_enrollment "$query_cert"
+  ) > "$T/health.out"
+  assert_has "$T/health.out" "mokutil --test-key (status $query_status):"
+  assert_has "$T/health.out" "$MOK_TEXT"
+  if [[ "$expected" == enrolled ]]; then
+    assert_has "$T/health.out" "OK MOK is enrolled: $query_cert"
+    assert_lacks "$T/health.out" 'WARN'
+    assert_lacks "$T/health.out" 'FAIL'
+  else
+    assert_lacks "$T/health.out" 'OK MOK is enrolled'
+    if [[ "$expected" == not-enrolled ]]; then
+      assert_has "$T/health.out" 'FAIL MOK NOT enrolled'
+    else
+      assert_has "$T/health.out" "WARN MOK enrollment check inconclusive (status $query_status)"
+    fi
+  fi
+  if bash "$T/repo/refresh.sh" > "$T/out" 2>&1; then
+    [[ "$expected" == enrolled ]] || fail "Refresh accepted '$MOK_TEXT' (status $query_status)"
+    assert_has "$T/out" "MOK is enrolled: $query_cert"
+    assert_has "$T/out" 'Refresh and verification completed successfully'
+  else
+    [[ "$expected" != enrolled ]] || fail "Refresh rejected confirmed enrollment: $(cat "$T/out")"
+    assert_lacks "$T/out" 'MOK is enrolled:'
+    assert_lacks "$T/out" 'Refresh and verification completed successfully'
+  fi
+  assert_has "$T/out" "mokutil --test-key (status $query_status):"
+  assert_has "$T/out" "$MOK_TEXT"
+  if [[ -n "$MOK_STDERR" ]]; then
+    assert_has "$T/out" "$MOK_STDERR"
+    assert_has "$T/health.out" "$MOK_STDERR"
+  fi
+}
+case_mok_missing_file() {
+  case "$1" in
+    missing) rm "$T/etc/secureboot/mok/MOK.cer" ;;
+    empty) : > "$T/etc/secureboot/mok/MOK.cer" ;;
+  esac
+  refresh_fixture
+  if bash "$T/repo/refresh.sh" > "$T/out" 2>&1; then fail 'Refresh accepted absent/empty certificate'; fi
+  assert_lacks "$T/commands" 'mokutil'
+  (
+    # shellcheck source=lib/checkhealth.sh
+    source "$T/repo/lib/checkhealth.sh"
+    h_fail() { echo "FAIL $*"; }
+    check_mok_enrollment "$T/etc/secureboot/mok/MOK.cer"
+  ) > "$T/health.out"
+  assert_has "$T/health.out" "FAIL Can't read MOK_CER"
+  assert_lacks "$T/commands" 'mokutil'
+}
+case_legacy_mok_other_failure() {
+  MOK_STATUS=1
+  case_refresh "$1"
+  assert_has "$T/out" 'MOK is enrolled:'
+}
+case_legacy_mok_full_health() {
+  MOK_STATUS=1
+  case_health_verification success
+  assert_has "$T/out" 'MOK is enrolled:'
+}
+case_missing_enrollment_library() {
+  refresh_fixture
+  rm "$T/usr/local/lib/sb-install/mok-enrollment.sh"
+  if bash "$T/repo/refresh.sh" > "$T/out" 2>&1; then fail 'Refresh accepted missing enrollment library'; fi
+  assert_has "$T/out" 'reinstall helpers with install.sh option 5'
 }
 case_install_helpers() {
   rm -rf "${T:?}/usr/local"
   # Actual menu option 5, decline immediate health check; sudo and destinations
   # are mocked/relocated. It must not ask for config/keys/ESP or first-boot steps.
   printf '5\ny\nn\n' | TEST_UID=1000 bash "$T/repo/install.sh" > "$T/out" 2>&1 || fail "Option 5 failed: $(cat "$T/out")"
-  for file in sbin/kernel-sbsign-all.sh sbin/secureboot-shim-sync sbin/grub-standalone-rebuild.sh sbin/secureboot-refresh lib/sb-install/grub-compat.sh; do
+  for file in sbin/kernel-sbsign-all.sh sbin/secureboot-shim-sync sbin/grub-standalone-rebuild.sh sbin/secureboot-refresh lib/sb-install/grub-compat.sh lib/sb-install/mok-enrollment.sh; do
     [[ -s "$T/usr/local/$file" ]] || fail "Helper not installed: $file"
   done
   for hook in 95-kernel-sbsign 98-shim-sync 99-grub-standalone; do
@@ -328,6 +409,11 @@ case_install_helpers() {
   done
   # Installed builder can immediately repair the existing configuration.
   bash "$T/usr/local/sbin/grub-standalone-rebuild.sh" > "$T/out" 2>&1 || fail "Installed builder failed: $(cat "$T/out")"
+  # Exercise the installed refresh and its installed enrollment dependency.
+  refresh_fixture
+  MOK_STATUS=1
+  bash "$T/usr/local/sbin/secureboot-refresh" > "$T/out" 2>&1 || fail "Installed refresh failed: $(cat "$T/out")"
+  assert_has "$T/out" 'MOK is enrolled:'
 }
 case_missing_tool() {
   export MISSING_TOOL="$2"
@@ -421,11 +507,11 @@ run_case 'kernel verifies temporary signature before replacement' case_kernel_su
 for mode in success kernel-fail grub-fail grub-skipped shim-fail helper-missing verify-fail image-missing mount-fail key-missing config-missing not-enrolled inconclusive; do
   run_case "refresh $mode" case_refresh "$mode"
 done
-run_case 'MOK positive result' case_mok 0 'MOK is already enrolled' 'OK MOK is enrolled'
-run_case 'MOK negative nonzero status' case_mok 1 'MOK is not enrolled' 'FAIL MOK NOT enrolled'
-run_case 'MOK negative text even with status zero' case_mok 0 'MOK is not enrolled' 'FAIL MOK NOT enrolled'
+run_case 'MOK positive result' case_mok 0 '%CERT% is already enrolled' 'OK MOK is enrolled'
+run_case 'MOK negative nonzero status' case_mok 1 '%CERT% is not enrolled' 'FAIL MOK NOT enrolled'
+run_case 'MOK negative text even with status zero' case_mok 0 '%CERT% is not enrolled' 'FAIL MOK NOT enrolled'
 run_case 'MOK unexpected nonzero status preserved' case_mok 2 'EFI variables unavailable' 'WARN MOK enrollment check inconclusive (status 2)'
-run_case 'MOK positive text cannot mask failure' case_mok 2 'MOK is enrolled' 'WARN MOK enrollment check inconclusive (status 2)'
+run_case 'MOK positive text cannot mask failure' case_mok 2 '%CERT% is already enrolled' 'WARN MOK enrollment check inconclusive (status 2)'
 run_case 'helper-only menu option 5 is complete and preserves configuration' case_install_helpers
 run_case 'real objcopy extracts PE SBAT' case_real_objcopy
 
@@ -437,3 +523,28 @@ run_case 'kernel signer requires sbsign' case_missing_tool kernel sbsign
 run_case 'health check uses valid certificate verification' case_health_verification success
 run_case 'health check propagates signature failure' case_health_verification failure
 run_case 'health check reports unavailable MOK check' case_mok_unavailable
+
+# mokutil 0.7.2 and newer behavior: the complete message AND status matter.
+for status in 0 1; do
+  run_case "MOK both callers: exact affirmative, status $status" case_mok_callers "$status" '%CERT% is already enrolled' enrolled
+  run_case "MOK both callers: explicit negative, status $status" case_mok_callers "$status" '%CERT% is not enrolled' not-enrolled
+  for result in 'is already in the enrollment request' 'is already blocked' 'is already in db' 'is already in the built-in keyring' 'is enrolled' 'is already enrolled (pending)' 'unknown result'; do
+    run_case "MOK both callers: $result, status $status" case_mok_callers "$status" "%CERT% $result" inconclusive
+  done
+  run_case "MOK both callers: empty output, status $status" case_mok_callers "$status" '' inconclusive
+  run_case "MOK both callers: wrong certificate, status $status" case_mok_callers "$status" '/another/MOK.cer is already enrolled' inconclusive
+  run_case "MOK both callers: contradictory output, status $status" case_mok_callers "$status" $'%CERT% is already enrolled\n%CERT% is not enrolled' inconclusive
+  run_case "MOK both callers: extra stderr, status $status" case_mok_callers "$status" '%CERT% is already enrolled' inconclusive 'Failed to read EFI variable MokListRT'
+done
+for status in 2 127 255; do
+  run_case "MOK both callers: affirmative with error status $status" case_mok_callers "$status" '%CERT% is already enrolled' inconclusive
+done
+for error in 'EFI variables are not supported on this system' 'Failed to read certificate' 'Permission denied' 'Not a valid x509 certificate in DER format'; do
+  run_case "MOK both callers: $error" case_mok_callers 255 "$error" inconclusive
+done
+for state in missing empty; do run_case "MOK certificate $state" case_mok_missing_file "$state"; done
+for failure in grub-fail kernel-fail shim-fail verify-fail; do
+  run_case "Confirmed legacy MOK cannot mask $failure" case_legacy_mok_other_failure "$failure"
+done
+run_case 'Full health check accepts status 1 confirmed enrollment' case_legacy_mok_full_health
+run_case 'Refresh diagnoses missing installed MOK library' case_missing_enrollment_library

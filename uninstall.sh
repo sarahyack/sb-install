@@ -143,6 +143,7 @@ uninstall_hooks_and_scripts() {
   rm_file /usr/local/sbin/grub-standalone-watch.sh
   rm_file /usr/local/sbin/secureboot-refresh
   rm_file /usr/local/lib/sb-install/grub-compat.sh
+  rm_file /usr/local/lib/sb-install/mok-enrollment.sh
   maybe_rmdir /usr/local/lib/sb-install
 }
 

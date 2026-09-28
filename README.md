@@ -194,6 +194,7 @@ Each option is safe to run individually if you understand the scope. You can rer
   - `/usr/local/sbin/grub-standalone-rebuild.sh`
   - `/usr/local/sbin/secureboot-refresh`
   - `/usr/local/lib/sb-install/grub-compat.sh`
+  - `/usr/local/lib/sb-install/mok-enrollment.sh`
   - `/usr/local/sbin/kernel-sbsign-all.sh`
 - Hooks:
   - `/etc/pacman.d/hooks/95-kernel-sbsign.hook`
@@ -340,6 +341,19 @@ A successful refresh and these checks do not establish that firmware/shim will
 boot the image on your machine; that still requires a live boot test.
 
 ## Health Check and Verification
+
+Refresh and the health check share the same MOK enrollment classification. They
+query with `LC_ALL=C` and log the actual output and exit status. Confirmation
+requires the complete message `<queried certificate path> is already enrolled`
+and status **0 or 1**; mokutil 0.7.2 uses status 1 for this result. A raw
+`mokutil --test-key` command can therefore return 1 even when enrollment is
+confirmed. Status alone, another certificate name, pending/blocked results,
+firmware-db or built-in-keyring membership, and additional diagnostics are not
+accepted as confirmed MOK enrollment. Other refresh failures still return failure.
+
+After updating, choose **option 5** to reinstall helpers, including
+`/usr/local/lib/sb-install/mok-enrollment.sh`, then run `sudo secureboot-refresh`.
+The helper update preserves configuration, keys, and firmware settings.
 
 The installer includes a health check (menu option 9). It checks the installed hooks/scripts, ESP mount state, MOK files, GRUB/kernel signatures, and shim/MokManager freshness.
 

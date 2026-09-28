@@ -16,6 +16,7 @@ SHIM_SYNC_HOOK_TEMPLATE="$SCRIPT_DIR/shim/shim-sync.hook"
 REFRESH_SCRIPT_TEMPLATE="$SCRIPT_DIR/refresh.sh"
 STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/grub-standalone/build-grub-standalone.sh"
 GRUB_COMPAT_TEMPLATE="$SCRIPT_DIR/lib/grub-compat.sh"
+MOK_ENROLLMENT_TEMPLATE="$SCRIPT_DIR/lib/mok-enrollment.sh"
 ENV_FILE="$SCRIPT_DIR/lib/env.sh"
 SB_INSTALL_RUN_ID="${SB_INSTALL_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
 export SB_INSTALL_RUN_ID
@@ -255,10 +256,14 @@ install_hooks() {
   [[ -f "$REFRESH_SCRIPT_TEMPLATE"     ]] || die "Missing template: $REFRESH_SCRIPT_TEMPLATE"
 
   [[ -f "$GRUB_COMPAT_TEMPLATE" ]] || die "Missing template: $GRUB_COMPAT_TEMPLATE"
+  [[ -f "$MOK_ENROLLMENT_TEMPLATE" ]] || die "Missing template: $MOK_ENROLLMENT_TEMPLATE"
   need_cmd objcopy # binutils: inspect the actual PE .sbat section
 
   say "Installing GRUB compatibility library"
   sudo install -D -m 0644 "$GRUB_COMPAT_TEMPLATE" /usr/local/lib/sb-install/grub-compat.sh
+
+  say "Installing MOK enrollment library"
+  sudo install -D -m 0644 "$MOK_ENROLLMENT_TEMPLATE" /usr/local/lib/sb-install/mok-enrollment.sh
 
   # Install kernel signing script + pacman hook (PostTransaction)
   say "Installing kernel signing script to /usr/local/sbin/kernel-sbsign-all.sh"

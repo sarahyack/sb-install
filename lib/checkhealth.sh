@@ -4,6 +4,8 @@
 HEALTH_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/helpers.sh
 source "$HEALTH_LIB_DIR/helpers.sh"
+# shellcheck source=lib/mok-enrollment.sh
+source "$HEALTH_LIB_DIR/mok-enrollment.sh"
 
 checkhealth() {
   say "Health Check: Secure Boot + Standalone GRUB + Hooks"
@@ -56,6 +58,7 @@ checkhealth() {
     "/usr/local/sbin/grub-standalone-rebuild.sh"
     "/usr/local/sbin/secureboot-refresh"
     "/usr/local/lib/sb-install/grub-compat.sh"
+    "/usr/local/lib/sb-install/mok-enrollment.sh"
   )
 
   for f in "${must_files[@]}"; do
@@ -314,7 +317,7 @@ check_mok_enrollment() {
     h_warn "MOK enrollment check unavailable: mokutil missing"
     return 0
   fi
-  if [[ -z "$cert" ]] || ! sudo test -r "$cert"; then
+  if [[ -z "$cert" ]] || ! sudo test -r "$cert" || ! sudo test -s "$cert"; then
     h_fail "Can't read MOK_CER for enrollment check: $cert"
     return 0
   fi
@@ -328,11 +331,10 @@ check_mok_enrollment() {
   rc=0
   out="$(sudo env LC_ALL=C mokutil --test-key "$cert" 2>&1)" || rc=$?
   h_info "mokutil --test-key (status $rc): $out"
-  if grep -qiE 'not enrolled|no.*match|not found' <<< "$out"; then
-    h_fail "MOK NOT enrolled: $cert"
-  elif (( rc == 0 )) && grep -qiE 'already enrolled|is enrolled' <<< "$out"; then
-    h_ok "MOK is enrolled: $cert"
-  else
-    h_warn "MOK enrollment check inconclusive (status $rc): $cert"
-  fi
+  case "$(mok_enrollment_result "$cert" "$rc" "$out")" in
+    enrolled) h_ok "MOK is enrolled: $cert" ;;
+    not-enrolled) h_fail "MOK NOT enrolled: $cert" ;;
+    *) h_warn "MOK enrollment check inconclusive (status $rc): $cert" ;;
+  esac
+  return 0
 }

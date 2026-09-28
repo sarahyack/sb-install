@@ -17,6 +17,10 @@ source "$CONF"
 : "${MOK_KEY:?missing MOK_KEY in conf}"
 : "${MOK_CRT:?missing MOK_CRT in conf}"
 MOK_CER="${MOK_CER:-${MOK_CRT%.*}.cer}"
+MOK_ENROLLMENT_LIB="/usr/local/lib/sb-install/mok-enrollment.sh"
+[[ -r "$MOK_ENROLLMENT_LIB" ]] || die "Missing $MOK_ENROLLMENT_LIB; reinstall helpers with install.sh option 5"
+# shellcheck source=lib/mok-enrollment.sh
+source "$MOK_ENROLLMENT_LIB"
 for file in "$MOK_KEY" "$MOK_CRT" "$MOK_CER"; do
   [[ -r "$file" && -s "$file" ]] || die "Missing/empty/unreadable key or certificate: $file"
 done
@@ -85,17 +89,19 @@ fi
 
 if command -v mokutil >/dev/null 2>&1; then
   MOK_RC=0
-  MOK_OUT="$(mokutil --test-key "$MOK_CER" 2>&1)" || MOK_RC=$?
+  MOK_OUT="$(LC_ALL=C mokutil --test-key "$MOK_CER" 2>&1)" || MOK_RC=$?
   log "mokutil --test-key (status $MOK_RC): $MOK_OUT"
-  if grep -qiE 'not enrolled|no.*match|not found' <<< "$MOK_OUT"; then
-    warn "MOK is not enrolled"
-    REFRESH_RC=1
-  elif (( MOK_RC == 0 )) && grep -qiE 'already enrolled|is enrolled' <<< "$MOK_OUT"; then
-    log "MOK is enrolled"
-  else
-    warn "MOK enrollment check is inconclusive (status $MOK_RC)"
-    REFRESH_RC=1
-  fi
+  case "$(mok_enrollment_result "$MOK_CER" "$MOK_RC" "$MOK_OUT")" in
+    enrolled) log "MOK is enrolled: $MOK_CER" ;;
+    not-enrolled)
+      warn "MOK is not enrolled: $MOK_CER"
+      REFRESH_RC=1
+      ;;
+    *)
+      warn "MOK enrollment check is inconclusive (status $MOK_RC)"
+      REFRESH_RC=1
+      ;;
+  esac
 else
   warn "MOK enrollment check unavailable: mokutil is missing"
   REFRESH_RC=1
