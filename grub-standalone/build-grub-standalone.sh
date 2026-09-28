@@ -4,60 +4,87 @@ set -euo pipefail
 log(){ echo "[grub-standalone] $*"; }
 warn(){ echo "[grub-standalone][WARN] $*" >&2; }
 
-[[ "${EUID:-$(id -u)}" -eq 0 ]] || { warn "Run as root (sudo)"; exit 1; }
+die(){ warn "$*"; exit 1; }
+
+[[ "$(id -u)" -eq 0 ]] || die "Run as root (sudo)"
+export LC_ALL=C
+for tool in flock mountpoint mount grub-mkconfig grub-mkstandalone sbsign sbverify objcopy awk od tr sort cmp diff readlink grep; do
+  command -v "$tool" >/dev/null 2>&1 || die "Missing required command: $tool"
+done
+COMPAT="/usr/local/lib/sb-install/grub-compat.sh"
+[[ -r "$COMPAT" ]] || die "Missing $COMPAT; reinstall helpers with install.sh option 5"
+# shellcheck source=lib/grub-compat.sh
+source "$COMPAT"
 
 LOCK="/run/grub-standalone-rebuild.lock"
 exec 9>"$LOCK"
 if ! flock -n 9; then
-  warn "Another standalone GRUB rebuild is already running; exiting."
-  exit 0
+  warn "Skipped: another standalone GRUB rebuild is running; retry refresh after it finishes."
+  exit 75
 fi
 
 CONF="/etc/secureboot/grub-standalone.conf"
-[[ -r "$CONF" ]] || { warn "Missing $CONF (not installed). Skipping."; exit 0; }
+[[ -r "$CONF" ]] || die "Missing $CONF (not installed)"
 # shellcheck source=/dev/null
 . "$CONF"
 
 : "${ESP_MOUNT:?missing ESP_MOUNT in conf}"
 : "${ESP_DEV:?missing ESP_DEV in conf}"
-: "${GRUB_ID:=GRUB}"
-: "${MOK_KEY:=/etc/secureboot/mok/MOK.key}"
-: "${MOK_CRT:=/etc/secureboot/mok/MOK.crt}"
+: "${GRUB_ID:?missing GRUB_ID in conf}"
+: "${MOK_KEY:?missing MOK_KEY in conf}"
+: "${MOK_CRT:?missing MOK_CRT in conf}"
 : "${MODULES:=}"
 : "${THEME_DIR:=}"
 : "${THEME_NAME:=starfield}"
 : "${SPLASH_SRC:=}"
+[[ "$GRUB_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || die "Invalid GRUB_ID: $GRUB_ID"
+[[ -s "$MOK_KEY" && -r "$MOK_KEY" && -s "$MOK_CRT" && -r "$MOK_CRT" ]] || die "MOK key/cert missing, empty or unreadable: $MOK_KEY / $MOK_CRT"
 
-# best-effort mount
+# Resolve the platform BEFORE either module filtering or SBAT selection.
+GRUBDIR="$(grub_platform_dir)" || die "Cannot resolve GRUB platform directory"
+log "GRUB module directory: $GRUBDIR"
+MODULES="$(grub_effective_modules "$GRUBDIR" "$MODULES")" || die "Module preflight failed"
+
 if ! mountpoint -q "$ESP_MOUNT"; then
   log "ESP not mounted at $ESP_MOUNT; attempting mount $ESP_DEV -> $ESP_MOUNT"
-  mkdir -p "$ESP_MOUNT" || true
-  if ! mount "$ESP_DEV" "$ESP_MOUNT" 2>/dev/null; then
-    warn "Could not mount ESP. Skipping rebuild."
-    exit 0
-  fi
+  mkdir -p "$ESP_MOUNT"
+  mount "$ESP_DEV" "$ESP_MOUNT" || die "Could not mount ESP"
 fi
-
-# sanity
-if [[ ! -r "$MOK_KEY" || ! -r "$MOK_CRT" ]]; then
-  warn "MOK key/cert not readable: $MOK_KEY / $MOK_CRT. Skipping."
-  exit 0
-fi
-command -v grub-mkconfig >/dev/null 2>&1 || { warn "Missing grub-mkconfig"; exit 0; }
-command -v grub-mkstandalone >/dev/null 2>&1 || { warn "Missing grub-mkstandalone"; exit 0; }
-command -v sbsign >/dev/null 2>&1 || { warn "Missing sbsign (sbsigntools)"; exit 0; }
-
-SBAT="/usr/share/grub/sbat.csv"
-if [[ ! -r "$SBAT" ]]; then
-  warn "Missing $SBAT; continuing anyway (some setups require it)."
-  SBAT=""
-fi
+mountpoint -q "$ESP_MOUNT" && [[ -d "$ESP_MOUNT" && -w "$ESP_MOUNT" ]] || die "ESP is not mounted/writable: $ESP_MOUNT"
 
 WORK_BASE="/var/lib/secureboot/grub-standalone"
 mkdir -p "$WORK_BASE"
 WORK="$(mktemp -d "$WORK_BASE/.work.XXXXXX")"
-cleanup(){ rm -rf "$WORK" || true; }
+declare -a destinations=() stages=() touched=()
+DEPLOYING=0
+cleanup() {
+  local rc=$? i failed=0
+  trap - EXIT
+  if (( DEPLOYING )); then
+    warn "Deployment failed; restoring previous GRUB files."
+    for i in "${!touched[@]}"; do
+      if [[ -f "${stages[i]}/old" ]]; then
+        mv -f "${stages[i]}/old" "${destinations[i]}" || failed=1
+      else
+        rm -f "${destinations[i]}" || failed=1
+      fi
+    done
+  fi
+  if (( failed )); then
+    warn "Rollback incomplete. Recovery files retained in: ${stages[*]} and $WORK_BASE/backups"
+    rc=1
+  else
+    for i in "${stages[@]}"; do rm -rf -- "$i"; done
+  fi
+  rm -rf -- "$WORK"
+  exit "$rc"
+}
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+grub_prepare_sbat "$GRUBDIR" /usr/share/grub/sbat.csv "$WORK" || die "SBAT selection failed"
+SBAT="$WORK/sbat.csv"
 
 backup_to_dir() {
   local src="$1" bdir="$2"
@@ -177,12 +204,6 @@ if [[ -n "$THEME_DIR" && -d "$THEME_DIR" ]]; then
   done < <(find "$THEME_DIR" -type f -print0)
 fi
 
-# directory for GRUB platform modules
-GRUBDIR="$(grub-install --print-directory 2>/dev/null || true)"
-if [[ -z "$GRUBDIR" ]]; then
-  GRUBDIR="/usr/lib/grub/x86_64-efi"
-fi
-
 UNSIGNED="$WORK/grubx64.efi.unsigned"
 SIGNED="$WORK/grubx64.efi"
 
@@ -193,32 +214,53 @@ args=(--directory "$GRUBDIR"
       --modules "$MODULES"
       --fonts unicode)
 
-if [[ -n "$SBAT" ]]; then
-  args+=(--sbat "$SBAT")
-fi
+args+=(--sbat "$SBAT")
 
-# NOTE: graft syntax is accepted as positional args (see manpage “Graft point syntax”)
-grub-mkstandalone "${args[@]}" "${grafts[@]}"
+# Preserve tool diagnostics, including warnings from otherwise successful builds.
+BUILD_RC=0
+grub-mkstandalone "${args[@]}" "${grafts[@]}" > "$WORK/build.log" 2>&1 || BUILD_RC=$?
+cat "$WORK/build.log"
+(( BUILD_RC == 0 )) || die "grub-mkstandalone failed (status $BUILD_RC)"
+if grep -Eiq 'warning.*sbat|sbat.*warning|sbat.*(mismatch|does not match|do not match|generation)|(mismatch|does not match|do not match).*sbat' "$WORK/build.log"; then
+  die "GRUB reported an SBAT warning/mismatch; refusing deployment"
+fi
+[[ -s "$UNSIGNED" ]] || die "GRUB produced an empty image"
+grub_verify_sbat "$UNSIGNED" "$SBAT" "$WORK" || die "Unsigned GRUB SBAT validation failed"
 
 log "Signing standalone GRUB EFI"
 sbsign --key "$MOK_KEY" --cert "$MOK_CRT" --output "$SIGNED" "$UNSIGNED"
+[[ -s "$SIGNED" ]] || die "sbsign produced an empty image"
+sbverify --cert "$MOK_CRT" "$SIGNED" || die "Signed GRUB verification failed"
+grub_verify_sbat "$SIGNED" "$SBAT" "$WORK" || die "Signed GRUB SBAT validation failed"
 
-# install to ESP vendor path + fallback path
+# shim owns BOOTx64.EFI. Only the vendor and fallback grubx64.efi are replaced.
 VENDOR="$ESP_MOUNT/EFI/$GRUB_ID/grubx64.efi"
-FALLDIR="$ESP_MOUNT/EFI/BOOT"
-FALL="$FALLDIR/grubx64.efi"
+FALL="$ESP_MOUNT/EFI/BOOT/grubx64.efi"
+destinations=("$VENDOR")
+[[ "$VENDOR" == "$FALL" ]] || destinations+=("$FALL")
 
-log "Backing up existing ESP binaries (if present)"
-backup_esp_binary "$VENDOR"
-backup_esp_binary "$FALL"
+log "Backing up and staging verified GRUB binaries"
+for i in "${!destinations[@]}"; do
+  target="${destinations[i]}"
+  [[ ! -L "$target" ]] || die "Refusing symlink destination: $target"
+  [[ ! -e "$target" || -f "$target" ]] || die "Not a regular EFI file: $target"
+  backup_esp_binary "$target"
+  mkdir -p "$(dirname "$target")"
+  stages[i]="$(mktemp -d "$(dirname "$target")/.grub-deploy.XXXXXX")"
+  if [[ -e "$target" ]]; then
+    cp "$target" "${stages[i]}/old"
+    cmp -s "$target" "${stages[i]}/old" || die "Rollback copy verification failed: $target"
+  fi
+  cp "$SIGNED" "${stages[i]}/new"
+  cmp -s "$SIGNED" "${stages[i]}/new" || die "Staged copy verification failed: $target"
+done
 
-log "Installing to: $VENDOR"
-mkdir -p "$(dirname "$VENDOR")"
-cp -f "$SIGNED" "$VENDOR"
-
-log "Installing fallback to: $FALL"
-mkdir -p "$FALLDIR"
-cp -f "$SIGNED" "$FALL"
-
-log "Done."
-exit 0
+DEPLOYING=1
+for i in "${!destinations[@]}"; do
+  log "Installing to: ${destinations[i]}"
+  touched[i]=1
+  mv -f "${stages[i]}/new" "${destinations[i]}"
+  cmp -s "$SIGNED" "${destinations[i]}" || die "Installed copy verification failed: ${destinations[i]}"
+done
+DEPLOYING=0
+log "Rebuilt, signed and verified vendor/fallback GRUB copies."

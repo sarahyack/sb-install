@@ -4,20 +4,20 @@ set -euo pipefail
 log(){ echo "[kernel-sbsign] $*"; }
 warn(){ echo "[kernel-sbsign][WARN] $*" >&2; }
 
-[[ "${EUID:-$(id -u)}" -eq 0 ]] || { warn "Run as root"; exit 1; }
+[[ "$(id -u)" -eq 0 ]] || { warn "Run as root"; exit 1; }
 
 CONF="/etc/secureboot/grub-standalone.conf"
-[[ -r "$CONF" ]] || { warn "Missing $CONF; skipping"; exit 0; }
+[[ -r "$CONF" ]] || { warn "Missing $CONF"; exit 1; }
 # shellcheck disable=SC1090
 . "$CONF"
 
-: "${MOK_KEY:=/etc/secureboot/mok/MOK.key}"
-: "${MOK_CRT:=/etc/secureboot/mok/MOK.crt}"
+: "${MOK_KEY:?missing MOK_KEY in conf}"
+: "${MOK_CRT:?missing MOK_CRT in conf}"
 
-command -v sbsign   >/dev/null 2>&1 || { warn "Missing sbsign (sbsigntools); skipping"; exit 0; }
-command -v sbverify >/dev/null 2>&1 || { warn "Missing sbverify (sbsigntools); skipping"; exit 0; }
+command -v sbsign   >/dev/null 2>&1 || { warn "Missing sbsign (sbsigntools)"; exit 1; }
+command -v sbverify >/dev/null 2>&1 || { warn "Missing sbverify (sbsigntools)"; exit 1; }
 
-[[ -r "$MOK_KEY" && -r "$MOK_CRT" ]] || { warn "Can't read MOK key/cert; skipping"; exit 0; }
+[[ -s "$MOK_KEY" && -r "$MOK_KEY" && -s "$MOK_CRT" && -r "$MOK_CRT" ]] || { warn "Can't read MOK key/cert"; exit 1; }
 
 BACKUP_DIR="/var/lib/secureboot/kernel-sbsign/backups"
 mkdir -p "$BACKUP_DIR"
@@ -69,7 +69,7 @@ prune_backups() {
 
 sign_one() {
   local k="$1"
-  [[ -f "$k" ]] || return 0
+  [[ -f "$k" && -s "$k" && -r "$k" ]] || { warn "Unusable kernel image: $k"; return 1; }
 
   # already good? skip.
   if sbverify --cert "$MOK_CRT" "$k" >/dev/null 2>&1; then
@@ -78,22 +78,32 @@ sign_one() {
   fi
 
   log "Signing: $k"
-  backup_kernel "$k"
-
-  local tmp="${k}.signed.$$"
+  TMP="$(mktemp "${k}.signed.XXXXXX")"
+  local tmp="$TMP"
   sbsign --key "$MOK_KEY" --cert "$MOK_CRT" --output "$tmp" "$k"
   test -s "$tmp" || { rm -f "$tmp"; warn "sbsign produced empty output for $k"; return 1; }
 
+  sbverify --cert "$MOK_CRT" "$tmp" || { warn "Signed kernel verification failed: $k"; return 1; }
+  chmod --reference="$k" "$tmp"
+  backup_kernel "$k"
   mv -f "$tmp" "$k"
-
-  sbverify --cert "$MOK_CRT" --verify "$k" >/dev/null
+  TMP=""
   log "Signed OK: $k"
 }
 
+TMP=""
+trap '[[ -z "$TMP" ]] || rm -f -- "$TMP"' EXIT
+
 # Sign all kernel images present in /boot
+COUNT=0
 for k in /boot/vmlinuz-*; do
   [[ -e "$k" ]] || continue
   sign_one "$k"
+  COUNT=$((COUNT+1))
 done
 
-log "Done."
+if (( COUNT == 0 )); then
+  warn "Skipped: no /boot/vmlinuz-* kernel images found"
+  exit 1
+fi
+log "Verified $COUNT kernel image(s)."

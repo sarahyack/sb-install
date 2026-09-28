@@ -15,6 +15,7 @@
 - [What Gets Installed (File Map)](#what-gets-installed-file-map)
 - [Backups and Retention](#backups-and-retention)
 - [Automatic Updates](#automatic-updates)
+- [Upgrading Helpers for GRUB 2.16](#upgrading-helpers-for-grub-216)
 - [Health Check and Verification](#health-check-and-verification)
 - [Troubleshooting](#troubleshooting)
 - [Recovery / Rollback](#recovery--rollback)
@@ -103,6 +104,7 @@ After install:
 - A recovery plan: ability to disable Secure Boot and boot a live USB if needed.
 - Sudo access and ability to reboot.
 - A bit of uninterrupted time (first run includes at least one reboot).
+- `binutils` (`objcopy`) for inspecting GRUB SBAT, plus `sbsigntools`, `mokutil`, `util-linux`, `gawk`, `coreutils`, `diffutils`, and `pacman`. The builder checks required inspection commands before building.
 
 Helpful commands:
 
@@ -133,7 +135,8 @@ Each option is safe to run individually if you understand the scope. You can rer
    - Creates a MOK, signs kernel(s), optionally signs an existing GRUB EFI, and copies `MOK.cer` to the ESP.
 
 5. **Install Post-Update hooks**
-   - Installs pacman hooks for shim synchronization, kernel signing, standalone GRUB rebuilds, and the manual refresh command.
+   - Installs/reinstalls all helpers and pacman hooks for shim synchronization, kernel signing, standalone GRUB rebuilds, and the manual refresh command, including the GRUB compatibility library.
+   - Preserves the existing configuration and keys. The immediate health check is optional.
 
 6. **Rebuild standalone GRUB + sign + copy fallback**
    - Builds and signs a standalone GRUB EFI with embedded assets.
@@ -190,6 +193,7 @@ Each option is safe to run individually if you understand the scope. You can rer
   - `/usr/local/sbin/secureboot-shim-sync`
   - `/usr/local/sbin/grub-standalone-rebuild.sh`
   - `/usr/local/sbin/secureboot-refresh`
+  - `/usr/local/lib/sb-install/grub-compat.sh`
   - `/usr/local/sbin/kernel-sbsign-all.sh`
 - Hooks:
   - `/etc/pacman.d/hooks/95-kernel-sbsign.hook`
@@ -245,7 +249,7 @@ You can also run a manual refresh any time:
 sudo secureboot-refresh
 ```
 
-This synchronizes shim/MokManager first, signs kernels if needed, rebuilds/re-signs the standalone GRUB EFI, and runs the existing best-effort verification checks. It does not create NVRAM entries, change `BootOrder`/`BootNext`, regenerate MOK keys, or enroll keys.
+This synchronizes shim/MokManager first, signs kernels if needed, rebuilds/re-signs the standalone GRUB EFI, and verifies the installed kernels and both GRUB copies against the configured MOK certificate. Missing prerequisites, helper failures (including a busy/skipped rebuild), signature failures, differing GRUB copies, and unavailable/inconclusive MOK enrollment checks return a nonzero status. It does not create NVRAM entries, change `BootOrder`/`BootNext`, regenerate MOK keys, or enroll keys.
 
 The shim synchronization and GRUB rebuild paths are safe to run repeatedly. The shim sync is a no-op when both ESP files already match the installed `shim-signed` package, and the GRUB rebuild uses a lock file to avoid concurrent runs.
 
@@ -265,6 +269,76 @@ sudo systemctl daemon-reload
 
 ---
 
+## Upgrading Helpers for GRUB 2.16
+
+For an existing installation, update the helpers without recreating your configuration:
+
+```bash
+git pull --ff-only
+bash install.sh
+# Choose option 5 and confirm helper/hook installation.
+# You may decline the immediate health check until after refresh.
+sudo secureboot-refresh
+```
+
+Run `install.sh` as your **normal user**; it uses sudo as needed. Option 5 also
+installs the runtime compatibility library. If `objcopy` is missing, install the
+Arch `binutils` package first. Option 6 and the full installation sequence are
+not needed for this repair.
+
+Option 5 preserves `/etc/secureboot/grub-standalone.conf`, including `ESP_MOUNT`,
+`ESP_DEV`, `GRUB_ID`, all MOK paths, modules, theme, splash and `WATCH_DIRS`, and
+preserves the existing keys. Neither this helper reinstall nor refresh changes
+NVRAM entries, BootOrder, BootNext, enrollment, or SBAT revocation policy.
+First-install enrollment/reboot steps are not required for this helper update.
+
+The builder resolves `/usr/lib/grub/x86_64-efi` before selecting modules and SBAT.
+Its `sbat.csv` supplies the authoritative header and global `grub` generation.
+Applicable `grub.*` distribution entries from `/usr/share/grub/sbat.csv` are
+retained only after checking that the metadata and selected modules have the
+same installed package owner. For the reported GRUB 2.16 layout, this selects
+platform generation **6** and retains **grub.arch generation 1**, excluding the
+shared file's stale global generation 4. Generations are read from the package,
+not hard-coded, and package-owned files are never edited. A shared-only legacy
+layout is accepted only if its metadata and package ownership validate; an
+invalid platform file never falls back silently.
+
+An absent legacy `efi_uga` is omitted with a warning for that build only. All
+other requested modules must exist in that same directory; missing modules are
+reported together and stop the build. The configuration is not rewritten.
+
+Build diagnostics and selected SBAT sources/generations appear in the output.
+Any SBAT warning from the build, malformed/missing/conflicting metadata, wrong
+embedded rows, signing failure, or failed certificate verification prevents
+GRUB deployment. Both unsigned and signed temporary images have their `.sbat`
+sections checked. Existing GRUB files are backed up, staged copies are compared
+with the verified image, and vendor/fallback copies are checked after installation.
+A reported deployment failure attempts rollback from private copies; a rollback
+failure reports the retained recovery paths. This cannot guarantee recovery from
+power loss or a failing ESP. GRUB is never installed over shim's `BOOTx64.EFI`.
+
+After refresh exits successfully, verify both deployed signatures and their bytes:
+
+```bash
+sudo bash -c '
+  set -e
+  source /etc/secureboot/grub-standalone.conf
+  sbverify --cert "$MOK_CRT" "$ESP_MOUNT/EFI/$GRUB_ID/grubx64.efi"
+  sbverify --cert "$MOK_CRT" "$ESP_MOUNT/EFI/BOOT/grubx64.efi"
+  cmp "$ESP_MOUNT/EFI/$GRUB_ID/grubx64.efi" "$ESP_MOUNT/EFI/BOOT/grubx64.efi"
+  objdump -s -j .sbat "$ESP_MOUNT/EFI/$GRUB_ID/grubx64.efi"
+  mokutil --test-key "$MOK_CER"
+'
+```
+
+Check the displayed `.sbat` for the logged global and vendor generations. Option
+9 runs the health check again. Signature verification uses
+[`sbverify --cert`](https://manpages.debian.org/testing/sbsigntool/sbverify.1.en.html);
+signature listing alone does not verify trust. SBAT inspection follows the
+[shim SBAT format](https://github.com/rhboot/shim/blob/main/SBAT.md).
+A successful refresh and these checks do not establish that firmware/shim will
+boot the image on your machine; that still requires a live boot test.
+
 ## Health Check and Verification
 
 The installer includes a health check (menu option 9). It checks the installed hooks/scripts, ESP mount state, MOK files, GRUB/kernel signatures, and shim/MokManager freshness.
@@ -279,7 +353,7 @@ You can also manually verify GRUB signatures:
 
 ```bash
 source /etc/secureboot/grub-standalone.conf
-sudo sbverify --list "$ESP_MOUNT/EFI/$GRUB_ID/grubx64.efi"
+sudo sbverify --cert "$MOK_CRT" "$ESP_MOUNT/EFI/$GRUB_ID/grubx64.efi"
 ```
 
 ---
@@ -437,3 +511,18 @@ sudo secureboot-refresh
 ```
 
 </details>
+
+## Development checks
+
+```bash
+bash tests/test-shim-sync.sh
+bash tests/test-grub-compat.sh
+while IFS= read -r script; do bash -n "$script" || exit; done < <(git ls-files '*.sh')
+# When available:
+shellcheck -s bash -x -P . install.sh refresh.sh grub-standalone/*.sh kernel/*.sh lib/*.sh tests/*.sh uninstall.sh
+```
+
+The tests use disposable directories and mocked commands, including failure
+injection for builds, signatures, metadata, copies and helper calls. The GRUB
+suite also exercises real `objcopy` extraction from a synthetic PE file when
+available. It does not modify real boot files, keys, mounts, or firmware variables.

@@ -137,30 +137,33 @@ sign_in_place() {
   sudo test -r "$cert"  || die "Can't read cert (need sudo?): $cert"
   sudo test -f "$target"|| die "Target not found: $target"
 
-  local dir base ts tmp bak
+  local dir base tmp bak
   dir="$(dirname -- "$target")"
   base="$(basename -- "$target")"
 
   # Temp file on SAME filesystem as target (ESP-safe)
   sudo mkdir -p "$dir/backups"
-  tmp="$(sudo mktemp --tmpdir="$dir/backups" ".${base}.sbsign.${ts}.XXXXXX")" \
+  tmp="$(sudo mktemp --tmpdir="$dir/backups" ".${base}.sbsign.XXXXXX")" \
     || die "mktemp failed in $dir/backups"
   bak="${dir}/backups/${base}.presign.bak"
 
   say "Signing: $target"
-  sudo sbsign --key "$key" --cert "$cert" --output "$tmp" "$target"
+  if ! sudo sbsign --key "$key" --cert "$cert" --output "$tmp" "$target"; then
+    sudo rm -f "$tmp"
+    die "Signing failed: $target"
+  fi
 
   # HARD SAFETY CHECKS so we never clobber target with junk/empty
   sudo test -s "$tmp" || { sudo rm -f "$tmp"; die "sbsign produced empty output for $target"; }
 
-  # sbverify is part of sbsigntools; confirms PE/COFF signature structure
-  if ! sudo sbverify --list "$tmp" >/dev/null 2>&1; then
+  # Verify the temporary signature against the requested certificate before replacement.
+  if ! sudo sbverify --cert "$cert" "$tmp"; then
     sudo rm -f "$tmp"
-    die "Signed output doesn't look like a PE/COFF EFI binary (sbverify failed): $target"
+    die "Signed output does not verify against the MOK certificate: $target"
   fi
 
   # Backup without -a (VFAT doesn't do ownership properly)
-  sudo cp -f "$target" "$bak" || warn "Backup failed: $bak"
+  sudo cp -f "$target" "$bak" || { sudo rm -f "$tmp"; die "Backup failed: $bak"; }
 
   # Atomic-ish replace (rename within same dir/filesystem)
   sudo mv -f "$tmp" "$target"
@@ -530,9 +533,10 @@ run_grub_builder() {
   say "Checking Grub Standalone Rebuild Script ..."
   if sudo test -x "$builderpath"; then
     say "Running Grub Standalone Rebuild ..."
-    sudo "$builderpath" || true
+    sudo "$builderpath"
   else
     warn "Standalone rebuild script missing: $builderpath"
+    return 1
   fi
 }
 

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+if [[ "$(id -u)" -eq 0 ]]; then
   echo "[ERR] Do not run this script as root. Run it as your normal user; it will use sudo when needed."
   exit 1
 fi
@@ -15,15 +15,19 @@ SHIM_SYNC_SCRIPT_TEMPLATE="$SCRIPT_DIR/shim/shim-sync.sh"
 SHIM_SYNC_HOOK_TEMPLATE="$SCRIPT_DIR/shim/shim-sync.hook"
 REFRESH_SCRIPT_TEMPLATE="$SCRIPT_DIR/refresh.sh"
 STANDALONE_GRUB_BUILDER="$SCRIPT_DIR/grub-standalone/build-grub-standalone.sh"
+GRUB_COMPAT_TEMPLATE="$SCRIPT_DIR/lib/grub-compat.sh"
 ENV_FILE="$SCRIPT_DIR/lib/env.sh"
 SB_INSTALL_RUN_ID="${SB_INSTALL_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
 export SB_INSTALL_RUN_ID
 
-# Load GRUB_MODULES into this script's environment (temporary)
-# shellcheck source=/dev/null
-[[ -f "$ENV_FILE" ]] || die "Missing env.sh"; source "$ENV_FILE"
-
 source "$SCRIPT_DIR/lib/helpers.sh"
+# Load GRUB_MODULES into this script's environment (temporary).
+[[ -f "$ENV_FILE" ]] || die "Missing env.sh"
+# shellcheck source=lib/env.sh
+source "$ENV_FILE"
+
+# shellcheck source=lib/grub-compat.sh
+source "$GRUB_COMPAT_TEMPLATE"
 source "$SCRIPT_DIR/lib/checkhealth.sh"
 
 show_intro() {
@@ -250,6 +254,12 @@ install_hooks() {
   [[ -f "$SHIM_SYNC_HOOK_TEMPLATE"      ]] || die "Missing template: $SHIM_SYNC_HOOK_TEMPLATE"
   [[ -f "$REFRESH_SCRIPT_TEMPLATE"     ]] || die "Missing template: $REFRESH_SCRIPT_TEMPLATE"
 
+  [[ -f "$GRUB_COMPAT_TEMPLATE" ]] || die "Missing template: $GRUB_COMPAT_TEMPLATE"
+  need_cmd objcopy # binutils: inspect the actual PE .sbat section
+
+  say "Installing GRUB compatibility library"
+  sudo install -D -m 0644 "$GRUB_COMPAT_TEMPLATE" /usr/local/lib/sb-install/grub-compat.sh
+
   # Install kernel signing script + pacman hook (PostTransaction)
   say "Installing kernel signing script to /usr/local/sbin/kernel-sbsign-all.sh"
   [[ -f "$KERNEL_SIGN_SCRIPT_TEMPLATE" ]] || die "Missing template: $KERNEL_SIGN_SCRIPT_TEMPLATE"
@@ -326,7 +336,10 @@ install_grub_standalone_maintenance() {
   # Build modules string: your env.sh GRUB_MODULES + required theme bits
   local modules_norm extras modules_final
   modules_norm="$(printf '%s' "$GRUB_MODULES" | tr '\n\t' '  ' | xargs)"
-  extras="font gfxterm gfxterm_background gfxmenu png gettext all_video efi_gop efi_uga"
+  extras="font gfxterm gfxterm_background gfxmenu png gettext all_video efi_gop"
+  local platform_dir
+  platform_dir="$(grub_platform_dir)" || die "Cannot resolve GRUB platform modules"
+  [[ ! -s "$platform_dir/efi_uga.mod" ]] || extras+=" efi_uga"
 
   # de-dup
   modules_final="$(
@@ -335,6 +348,8 @@ install_grub_standalone_maintenance() {
       | awk 'NF && !seen[$0]++' \
       | paste -sd' ' -
   )"
+
+  modules_final="$(grub_effective_modules "$platform_dir" "$modules_final")" || die "Module preflight failed"
 
   say "Writing config: /etc/secureboot/grub-standalone.conf"
   sudo install -d -m 0755 /etc/secureboot
@@ -417,9 +432,11 @@ install_grub_btrfs_support() {
 }
 
 run_healthcheck() {
-    confirm "Perform Health Check Now? [y/n]" 0
-
-    checkhealth
+    if confirm "Perform Health Check Now?" 0; then
+      checkhealth
+    else
+      say "Health check skipped."
+    fi
 }
 
 final_instructions() {
@@ -482,8 +499,6 @@ main() {
       sign_kernel_and_grub_with_mok "$esp"
       ;;
     5)
-      confirm "WARNING: Only Run This Option After a Full Sequence Has Been Run on Your Machine! Continue (y/n)?" 0 \
-          || { say "Canceling hook installation."; return 0; }
       install_hooks
       ;;
     6)
@@ -512,7 +527,11 @@ main() {
       run_healthcheck
   fi
 
-  final_instructions
+  if [[ "$sel" == 5 ]]; then
+    say "Helper maintenance finished. Next: sudo secureboot-refresh"
+  else
+    final_instructions
+  fi
 }
 
 main "$@"

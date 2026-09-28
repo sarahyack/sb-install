@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Checkhealth Function For Sb-Install
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/helpers.sh"
+HEALTH_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/helpers.sh
+source "$HEALTH_LIB_DIR/helpers.sh"
 
 checkhealth() {
   say "Health Check: Secure Boot + Standalone GRUB + Hooks"
@@ -26,8 +27,8 @@ checkhealth() {
   # --- 2) Dependencies (soft fail where reasonable) ---
   local -a cmds=(
     grub-mkstandalone grub-mkconfig
-    sbsign sbverify
-    findmnt mount flock awk sed grep
+    sbsign sbverify objcopy
+    findmnt mount mountpoint flock awk sed grep od tr sort cmp diff readlink
   )
   for c in "${cmds[@]}"; do
     if have_cmd "$c"; then
@@ -35,7 +36,7 @@ checkhealth() {
     else
       # some are truly required for correct operation
       case "$c" in
-        grub-mkstandalone|grub-mkconfig|sbsign|sbverify|flock)
+        grub-mkstandalone|grub-mkconfig|sbsign|sbverify|objcopy|mountpoint|flock|awk|od|tr|sort|cmp|diff|readlink)
           h_fail "Missing required command: $c"
           ;;
         *)
@@ -54,6 +55,7 @@ checkhealth() {
     "/usr/local/sbin/secureboot-shim-sync"
     "/usr/local/sbin/grub-standalone-rebuild.sh"
     "/usr/local/sbin/secureboot-refresh"
+    "/usr/local/lib/sb-install/grub-compat.sh"
   )
 
   for f in "${must_files[@]}"; do
@@ -96,19 +98,22 @@ checkhealth() {
     MOK_CRT="$(conf_get_var_as_root "$CONF" MOK_CRT)"
     MOK_CER="$(conf_get_var_as_root "$CONF" MOK_CER)"
 
-    [[ -n "$ESP_MOUNT" ]] && h_ok "ESP_MOUNT=$ESP_MOUNT" || h_fail "ESP_MOUNT is empty in $CONF"
-    [[ -n "$GRUB_ID" ]]   && h_ok "GRUB_ID=$GRUB_ID"     || h_fail "GRUB_ID is empty in $CONF"
-    [[ -n "$MOK_KEY" ]]   && h_ok "MOK_KEY=$MOK_KEY"     || h_fail "MOK_KEY is empty in $CONF"
-    [[ -n "$MOK_CRT" ]]   && h_ok "MOK_CRT=$MOK_CRT"     || h_fail "MOK_CRT is empty in $CONF"
-    [[ -n "$MOK_CER" ]]   && h_ok "MOK_CER=$MOK_CER"     || h_fail "MOK_CER is empty in $CONF"
+    local var
+    for var in ESP_MOUNT GRUB_ID MOK_KEY MOK_CRT MOK_CER; do
+      if [[ -n "${!var}" ]]; then
+        h_ok "$var=${!var}"
+      else
+        h_fail "$var is empty in $CONF"
+      fi
+    done
   fi
 
   # --- 5) ESP sanity ---
   if [[ -n "$ESP_MOUNT" ]]; then
     if sudo test -d "$ESP_MOUNT"; then
       h_ok "ESP mount path exists: $ESP_MOUNT"
-      if findmnt -rn --target "$ESP_MOUNT" >/dev/null 2>&1; then
-        h_ok "ESP is mounted (findmnt sees it)"
+      if mountpoint -q "$ESP_MOUNT"; then
+        h_ok "ESP is a mountpoint"
       else
         h_fail "ESP path exists but does not appear mounted: $ESP_MOUNT"
       fi
@@ -146,6 +151,11 @@ checkhealth() {
   fi
 
   # --- 7) Verify signatures (kernel + GRUB EFI) ---
+  if [[ -n "$MOK_KEY" ]] && sudo test -s "$MOK_KEY" && sudo test -r "$MOK_KEY"; then
+    h_ok "MOK signing key readable: $MOK_KEY"
+  else
+    h_fail "Missing/empty/unreadable MOK signing key: $MOK_KEY"
+  fi
   if [[ -n "$MOK_CRT" ]]; then
     if sudo test -r "$MOK_CRT"; then
       h_ok "MOK cert readable: $MOK_CRT"
@@ -167,7 +177,7 @@ checkhealth() {
     for k in /boot/vmlinuz-*; do
       [[ -e "$k" ]] || continue
       any_kernel=1
-      if sudo sbverify --cert "$MOK_CRT" --verify "$k" >/dev/null 2>&1; then
+      if sudo sbverify --cert "$MOK_CRT" "$k" >/dev/null 2>&1; then
         h_ok "kernel signed OK: $k"
       else
         h_fail "kernel NOT signed by MOK cert: $k (run: sudo /usr/local/sbin/kernel-sbsign-all.sh)"
@@ -185,13 +195,7 @@ checkhealth() {
       if sudo test -f "$efi"; then
         h_ok "EFI exists: $efi"
 
-        if sudo sbverify --list "$efi" >/dev/null 2>&1; then
-          h_ok "EFI has a parseable signature: $efi"
-        else
-          h_fail "EFI signature structure invalid (sbverify --list failed): $efi"
-        fi
-
-        if sudo sbverify --cert "$MOK_CRT" --verify "$efi" >/dev/null 2>&1; then
+        if sudo sbverify --cert "$MOK_CRT" "$efi" >/dev/null 2>&1; then
           h_ok "EFI verifies against MOK cert: $efi"
         else
           h_fail "EFI does NOT verify against MOK cert: $efi (run: sudo /usr/local/sbin/grub-standalone-rebuild.sh)"
@@ -202,36 +206,8 @@ checkhealth() {
     done
   fi
 
-  # --- 7) MOK enrollment (best-effort, optional) ---
-  # Use MOK_CER (DER) and run mokutil with sudo.
-  if have_cmd mokutil && [[ -n "$MOK_CER" ]]; then
-    h_info "Secure Boot state (mokutil):"
-    sudo mokutil --sb-state 2>/dev/null | sed 's/^/    /' || true
-  
-    if sudo test -r "$MOK_CER"; then
-      local out rc
-      out="$(sudo mokutil --test-key "$MOK_CER" 2>&1 || true)"
-      rc=$?
-  
-      # Some mokutil versions return non-zero even when enrolled.
-      if [[ "$rc" -eq 0 ]] || echo "$out" | grep -qiE 'already enrolled|is enrolled|enrolled'; then
-        h_ok "MOK appears enrolled (mokutil --test-key): $MOK_CER"
-        h_info "mokutil output: $out"
-      elif echo "$out" | grep -qiE 'not enrolled|no.*match|not found'; then
-        h_fail "MOK NOT enrolled (mokutil --test-key): $MOK_CER"
-        h_info "mokutil output: $out"
-        h_info "Fix: copy MOK.cer to ESP, reboot into MokManager, enroll it."
-      else
-        h_warn "mokutil --test-key returned an unexpected result (rc=$rc): $MOK_CER"
-        h_info "mokutil output: $out"
-        h_info "If Secure Boot boots fine + EFI verifies against MOK cert, this is likely a mokutil quirk."
-      fi
-    else
-      h_fail "Can't read MOK_CER for mokutil test: $MOK_CER"
-    fi
-  else
-    h_warn "mokutil not available or MOK_CER missing; skipping enrollment test (install mokutil and set MOK_CER)"
-  fi
+  # --- MOK enrollment: preserve exit status and distinguish negative text. ---
+  check_mok_enrollment "$MOK_CER"
 
   # --- Optional: Snapshot support checks (grub-btrfs + snapper/timeshift) ---
   h_section "Snapshot Support (optional)"
@@ -329,5 +305,34 @@ checkhealth() {
     say "Health Check Result: FAIL ❌  (failures: $FAIL, warnings: $WARN)"
     h_info "Tip: re-run the hooks install option if hooks are missing."
     return 1
+  fi
+}
+
+check_mok_enrollment() {
+  local cert="$1" out rc
+  if ! command -v mokutil >/dev/null 2>&1; then
+    h_warn "MOK enrollment check unavailable: mokutil missing"
+    return 0
+  fi
+  if [[ -z "$cert" ]] || ! sudo test -r "$cert"; then
+    h_fail "Can't read MOK_CER for enrollment check: $cert"
+    return 0
+  fi
+  rc=0
+  out="$(sudo env LC_ALL=C mokutil --sb-state 2>&1)" || rc=$?
+  if (( rc == 0 )); then
+    h_info "Secure Boot state: $out"
+  else
+    h_warn "Secure Boot state unavailable (status $rc): $out"
+  fi
+  rc=0
+  out="$(sudo env LC_ALL=C mokutil --test-key "$cert" 2>&1)" || rc=$?
+  h_info "mokutil --test-key (status $rc): $out"
+  if grep -qiE 'not enrolled|no.*match|not found' <<< "$out"; then
+    h_fail "MOK NOT enrolled: $cert"
+  elif (( rc == 0 )) && grep -qiE 'already enrolled|is enrolled' <<< "$out"; then
+    h_ok "MOK is enrolled: $cert"
+  else
+    h_warn "MOK enrollment check inconclusive (status $rc): $cert"
   fi
 }
